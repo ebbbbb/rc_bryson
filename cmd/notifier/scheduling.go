@@ -17,9 +17,56 @@ func runRetryScheduler(ctx context.Context, store *delivery.Store, logger *slog.
 
 func runLeaseReconciler(ctx context.Context, store *delivery.Store, logger *slog.Logger) {
 	runMaintenanceLoop(ctx, time.Second, func(loopContext context.Context) error {
-		_, err := store.RecoverExpiredDeliveries(loopContext, 100)
+		if _, err := store.RecoverExpiredDeliveries(loopContext, 100); err != nil {
+			return err
+		}
+		_, err := store.ReconcileStalledSignals(loopContext, time.Minute, 100)
 		return err
 	}, "lease_reconciler", logger)
+}
+
+func runRetention(ctx context.Context, store *delivery.Store, logger *slog.Logger) {
+	runMaintenanceLoop(ctx, time.Hour, func(loopContext context.Context) error {
+		_, err := store.DeleteExpiredTerminal(
+			loopContext,
+			7*24*time.Hour,
+			30*24*time.Hour,
+			1000,
+		)
+		return err
+	}, "retention", logger)
+}
+
+func runOperationalAlerts(ctx context.Context, store *delivery.Store, logger *slog.Logger) {
+	runMaintenanceLoop(ctx, 30*time.Second, func(loopContext context.Context) error {
+		snapshot, err := store.OperationalMetrics(loopContext)
+		if err != nil {
+			return err
+		}
+		alertOperationalState(logger, snapshot)
+		return nil
+	}, "operational_alerts", logger)
+}
+
+func alertOperationalState(logger *slog.Logger, snapshot delivery.OperationalSnapshot) {
+	if snapshot.OldestPendingSeconds >= 60 {
+		logger.Warn(
+			"delivery backlog is aging",
+			"oldest_pending_seconds", snapshot.OldestPendingSeconds,
+		)
+	}
+	if snapshot.OldestOutboxSeconds >= 60 {
+		logger.Warn(
+			"Outbox publication is delayed",
+			"oldest_outbox_seconds", snapshot.OldestOutboxSeconds,
+		)
+	}
+	if snapshot.ExpiredLeases > 0 {
+		logger.Warn(
+			"expired Worker leases require reconciliation",
+			"expired_leases", snapshot.ExpiredLeases,
+		)
+	}
 }
 
 func runMaintenanceLoop(

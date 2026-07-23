@@ -8,7 +8,7 @@ persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** Slices 1–6 provide durable submission, caller idempotency,
+> **Project status:** Slices 1–7 provide durable submission, caller idempotency,
 > registered destination authorization, status lookup, admission backpressure,
 > confirmed Outbox-to-RabbitMQ dispatch, and fenced HTTPS success delivery with
 > the minimum SSRF boundary, classified results, bounded retry scheduling, lease
@@ -16,8 +16,10 @@ supplier idempotency values limit the impact of at-least-once retries.
 > operator replay. Adversarial outbound-security coverage includes fixed
 > validated-IP dialing, TLS hostname verification, forbidden-address rejection,
 > redirect blocking, Header protection, dynamic secret resolution, and log
-> redaction checks. Production operations remain planned in `docs/exec-plan.md`.
-> This is not yet a production-ready notification service.
+> redaction checks. Reconciliation, terminal retention, health/readiness, bounded
+> operational metrics, and backlog alerts are implemented. Capacity and resilience
+> acceptance remain planned in `docs/exec-plan.md`. This is not yet a
+> production-ready notification service.
 
 ## Design at a glance
 
@@ -126,6 +128,20 @@ make migrate ARGS='-version'
 The migration command exposes the repository's pinned migration tool.
 Implementation sequencing and acceptance evidence live in
 [`docs/exec-plan.md`](docs/exec-plan.md).
+
+## Operational endpoints
+
+- `GET /healthz` reports process liveness.
+- `GET /readyz` reports PostgreSQL readiness. RabbitMQ outages do not make the API
+  unready because accepted tasks remain durable in PostgreSQL and Outbox.
+- `GET /metrics` exposes oldest pending and Outbox ages, expired leases, RabbitMQ
+  queue depth, permanent failures, and fixed delivery-result classes in Prometheus
+  text format.
+
+The application emits bounded structured warnings when pending or Outbox age
+reaches 60 seconds or expired Worker leases are observed. These warnings indicate
+operator investigation points; they are not an unconditional delivery-latency
+SLO.
 
 ## Security notes
 

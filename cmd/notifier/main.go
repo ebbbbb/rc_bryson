@@ -14,9 +14,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"reliable-notifier/internal/delivery"
+	"reliable-notifier/internal/dispatch"
 )
 
-func newMux(api *delivery.API, ready func(context.Context) error) http.Handler {
+func newMux(
+	api *delivery.API,
+	ready func(context.Context) error,
+	metrics http.Handler,
+) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -34,6 +39,9 @@ func newMux(api *delivery.API, ready func(context.Context) error) http.Handler {
 	})
 	if api != nil {
 		api.Register(mux)
+	}
+	if metrics != nil {
+		mux.Handle("GET /metrics", metrics)
 	}
 	return mux
 }
@@ -75,10 +83,17 @@ func main() {
 		logger.Error("delivery API configuration failed", "error", "invalid_configuration")
 		os.Exit(1)
 	}
+	rabbitURL := envOr("RABBITMQ_URL", "amqp://notifier:notifier-test-only@localhost:15672/")
+	metrics := newMetricsHandler(
+		store.OperationalMetrics,
+		func(ctx context.Context) (int, error) {
+			return dispatch.QueueDepth(ctx, rabbitURL)
+		},
+	)
 
 	server := &http.Server{
 		Addr:              envOr("HTTP_ADDR", ":8080"),
-		Handler:           newMux(api, pool.Ping),
+		Handler:           newMux(api, pool.Ping, metrics),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -91,7 +106,7 @@ func main() {
 		go runPublisher(
 			ctx,
 			store,
-			envOr("RABBITMQ_URL", "amqp://notifier:notifier-test-only@localhost:15672/"),
+			rabbitURL,
 			logger,
 		)
 	}
@@ -99,12 +114,14 @@ func main() {
 		go runWorker(
 			ctx,
 			store,
-			envOr("RABBITMQ_URL", "amqp://notifier:notifier-test-only@localhost:15672/"),
+			rabbitURL,
 			logger,
 		)
 	}
 	go runRetryScheduler(ctx, store, logger)
 	go runLeaseReconciler(ctx, store, logger)
+	go runRetention(ctx, store, logger)
+	go runOperationalAlerts(ctx, store, logger)
 
 	errs := make(chan error, 1)
 	go func() {
