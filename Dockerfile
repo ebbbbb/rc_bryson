@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG PACKAGE
-RUN CGO_ENABLED=0 go build -trimpath -o /out/service "${PACKAGE}"
+ARG TAGS
+RUN CGO_ENABLED=0 go build -trimpath -tags "${TAGS}" -o /out/service "${PACKAGE}"
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 RUN addgroup -S service && adduser -S -G service service

@@ -93,9 +93,11 @@ services:
       context: .
       args:
         PACKAGE: ./cmd/notifier
+        TAGS: testnetwork
     ports:
       - "${APP_PORT:-18080}:8080"
     environment:
+      APP_ENV: test
       DATABASE_URL: postgres://notifier:notifier-test-only@postgres:5432/notifier?sslmode=disable
       RABBITMQ_URL: amqp://notifier:notifier-test-only@rabbitmq:5672/
       PUBLISHER_ENABLED: "${PUBLISHER_ENABLED:-true}"

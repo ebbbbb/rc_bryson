@@ -19,8 +19,11 @@ func runWorker(
 	sender, err := outbound.NewSender(
 		nil,
 		outbound.EnvironmentSecrets{},
-		envOr("BOOTSTRAP_LOCAL_CONFIG", "false") == "true" &&
-			envOr("ALLOW_TEST_NETWORK_POLICY", "false") == "true",
+		allowTestNetworkPolicy(
+			envOr("APP_ENV", "production"),
+			envOr("BOOTSTRAP_LOCAL_CONFIG", "false"),
+			envOr("ALLOW_TEST_NETWORK_POLICY", "false"),
+		),
 		envOr("TEST_SUPPLIER_CA_FILE", ""),
 	)
 	if err != nil {
@@ -58,6 +61,13 @@ func runWorker(
 			return
 		}
 	}
+}
+
+func allowTestNetworkPolicy(environment, bootstrap, allowance string) bool {
+	return testNetworkPolicyBuildEnabled &&
+		environment == "test" &&
+		bootstrap == "true" &&
+		allowance == "true"
 }
 
 func waitWorker(ctx context.Context, duration time.Duration) bool {

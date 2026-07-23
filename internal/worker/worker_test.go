@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,6 +136,37 @@ func TestStaleResultIsAcknowledgedOnlyAfterFencedDiscard(t *testing.T) {
 	}
 	if store.completes.Load() != 1 {
 		t.Fatal("fenced result was not attempted before ACK decision")
+	}
+}
+
+func TestWorkerLogsDoNotExposeSensitiveHeadersOrBody(t *testing.T) {
+	const (
+		secret = "seeded-secret-must-not-leak"
+		body   = "seeded-body-must-not-leak"
+	)
+	store := successfulFakeStore()
+	store.task.CallerHeaders = map[string]string{"x-sensitive": secret}
+	store.task.Body = []byte(body)
+	store.completeErr = delivery.ErrWorkerLeaseLost
+	var logs bytes.Buffer
+	instance, err := New(
+		store,
+		&fakeSender{},
+		"worker-1",
+		30*time.Second,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack, err := instance.Process(
+		t.Context(),
+		dispatch.Signal{DeliveryID: "delivery-1", Generation: 0},
+	); err != nil || !ack {
+		t.Fatalf("Process = (%t, %v), want ACK and nil", ack, err)
+	}
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), body) {
+		t.Fatalf("Worker logs exposed sensitive request material: %q", logs.String())
 	}
 }
 

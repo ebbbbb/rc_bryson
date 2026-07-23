@@ -33,6 +33,16 @@ func (provider fixedSecrets) Resolve(context.Context, string) (string, error) {
 	return provider.value, nil
 }
 
+type rotatingSecrets struct {
+	values []string
+	index  atomic.Int32
+}
+
+func (provider *rotatingSecrets) Resolve(context.Context, string) (string, error) {
+	index := int(provider.index.Add(1)) - 1
+	return provider.values[index], nil
+}
+
 func TestSenderUsesValidatedIPAndRegisteredHostname(t *testing.T) {
 	certificate, err := tls.LoadX509KeyPair(
 		fixturePath(t, "fake-supplier.crt"),
@@ -132,10 +142,53 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 			wantError: "test-only destination policy",
 		},
 		{
+			name:       "test policy hostname mismatch",
+			rawURL:     "https://supplier.example/notify",
+			policy:     testNetworkPolicy,
+			testPolicy: true,
+			addresses:  []net.IP{net.ParseIP("127.0.0.1")},
+			wantError:  "test-only destination policy",
+		},
+		{
 			name:      "production private address",
 			rawURL:    "https://supplier.example/notify",
 			policy:    "public-internet",
 			addresses: []net.IP{net.ParseIP("10.0.0.1")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production loopback address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("127.0.0.1")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production link-local metadata address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("169.254.169.254")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production IPv6 link-local address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("fe80::1")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production multicast address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("224.0.0.1")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production unspecified address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("::")},
 			wantError: "forbidden address",
 		},
 		{
@@ -153,6 +206,27 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 			addresses:  []net.IP{net.ParseIP("127.0.0.1")},
 			headers:    map[string]string{"authorization": "caller-secret"},
 			wantError:  "protected Header",
+		},
+		{
+			name:       "case-insensitive duplicate stored Header",
+			rawURL:     "https://fake-supplier.test/notify",
+			policy:     testNetworkPolicy,
+			testPolicy: true,
+			addresses:  []net.IP{net.ParseIP("127.0.0.1")},
+			headers: map[string]string{
+				"X-Event-Type": "first",
+				"x-event-type": "second",
+			},
+			wantError: "duplicate Header",
+		},
+		{
+			name:       "Header value smuggling",
+			rawURL:     "https://fake-supplier.test/notify",
+			policy:     testNetworkPolicy,
+			testPolicy: true,
+			addresses:  []net.IP{net.ParseIP("127.0.0.1")},
+			headers:    map[string]string{"x-event-type": "safe\r\nX-Escaped: true"},
+			wantError:  "invalid Header",
 		},
 	}
 
@@ -191,13 +265,57 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 	}
 }
 
-func TestSenderDoesNotFollowRedirect(t *testing.T) {
-	var connections atomic.Int32
-	var requests atomic.Int32
+func TestSenderPinsFirstValidatedDNSAnswerAcrossResolutionChanges(t *testing.T) {
+	resolver := &changingResolver{
+		responses: [][]net.IP{
+			{net.ParseIP("203.0.113.8")},
+			{net.ParseIP("127.0.0.1")},
+		},
+	}
+	sender, err := NewSender(
+		resolver,
+		fixedSecrets{value: "secret"},
+		false,
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dialed string
+	sender.dial = func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialed = address
+		return nil, net.ErrClosed
+	}
+	task, destination := testTaskAndDestination("https://supplier.example/notify")
+	destination.NetworkPolicy = "public-internet"
+	_, err = sender.Send(t.Context(), task, destination)
+	if err == nil {
+		t.Fatal("expected synthetic dial failure")
+	}
+	if resolver.calls.Load() != 1 {
+		t.Fatalf("DNS lookups = %d, want exactly one", resolver.calls.Load())
+	}
+	if dialed != "203.0.113.8:443" {
+		t.Fatalf("dialed %q, want first validated address", dialed)
+	}
+}
+
+type changingResolver struct {
+	responses [][]net.IP
+	calls     atomic.Int32
+}
+
+func (resolver *changingResolver) LookupIP(context.Context, string, string) ([]net.IP, error) {
+	index := int(resolver.calls.Add(1)) - 1
+	return resolver.responses[index], nil
+}
+
+func TestSenderResolvesRotatedSecretForEveryAttempt(t *testing.T) {
+	secrets := &rotatingSecrets{values: []string{"first-secret", "second-secret"}}
+	seen := make(chan string, 2)
 	listener, server := newTLSServer(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requests.Add(1)
-		response.Header().Set("Location", "https://fake-supplier.test/second")
-		response.WriteHeader(http.StatusTemporaryRedirect)
+		seen <- request.Header.Get("Authorization")
+		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer listener.Close()
 	defer server.Close()
@@ -205,28 +323,105 @@ func TestSenderDoesNotFollowRedirect(t *testing.T) {
 	_, port, _ := net.SplitHostPort(listener.Addr().String())
 	sender, err := NewSender(
 		fixedResolver{addresses: []net.IP{net.ParseIP("127.0.0.1")}},
-		fixedSecrets{value: "secret"},
+		secrets,
 		true,
 		fixturePath(t, "test-ca.crt"),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialer := &net.Dialer{}
-	sender.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
-		connections.Add(1)
-		return dialer.DialContext(ctx, network, address)
+	task, destination := testTaskAndDestination("https://fake-supplier.test:" + port + "/notify")
+	for range 2 {
+		if _, err := sender.Send(t.Context(), task, destination); err != nil {
+			t.Fatal(err)
+		}
 	}
-	task, destination := testTaskAndDestination("https://fake-supplier.test:" + port + "/redirect")
-	result, err := sender.Send(t.Context(), task, destination)
+	if first, second := <-seen, <-seen; first != "first-secret" || second != "second-secret" {
+		t.Fatalf("injected secrets = %q, %q", first, second)
+	}
+	if destination.SecretRef != "env:SUPPLIER_SECRET" {
+		t.Fatalf("bound destination secret reference mutated to %q", destination.SecretRef)
+	}
+}
+
+func TestSenderDoesNotFollowRedirect(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var connections atomic.Int32
+			var requests atomic.Int32
+			listener, server := newTLSServer(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				response.Header().Set("Location", "//fake-supplier.test/second")
+				response.WriteHeader(status)
+			}))
+			defer listener.Close()
+			defer server.Close()
+
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			sender, err := NewSender(
+				fixedResolver{addresses: []net.IP{net.ParseIP("127.0.0.1")}},
+				fixedSecrets{value: "secret"},
+				true,
+				fixturePath(t, "test-ca.crt"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialer := &net.Dialer{}
+			sender.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+				connections.Add(1)
+				return dialer.DialContext(ctx, network, address)
+			}
+			task, destination := testTaskAndDestination("https://fake-supplier.test:" + port + "/redirect")
+			result, err := sender.Send(t.Context(), task, destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.StatusCode != status {
+				t.Fatalf("status = %d, want redirect response %d", result.StatusCode, status)
+			}
+			if connections.Load() != 1 || requests.Load() != 1 {
+				t.Fatalf("connections = %d, requests = %d, want one and one", connections.Load(), requests.Load())
+			}
+		})
+	}
+}
+
+func TestSenderTLSFailureDoesNotExposeSecretOrBody(t *testing.T) {
+	const (
+		secret = "seeded-secret-must-not-leak"
+		body   = "seeded-body-must-not-leak"
+	)
+	listener, server := newTLSServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer listener.Close()
+	defer server.Close()
+
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	sender, err := NewSender(
+		fixedResolver{addresses: []net.IP{net.ParseIP("127.0.0.1")}},
+		fixedSecrets{value: secret},
+		true,
+		fixturePath(t, "test-ca.crt"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("status = %d, want redirect response", result.StatusCode)
+	task, destination := testTaskAndDestination("https://fake-supplier.test:" + port + "/notify")
+	task.Body = []byte(body)
+	sender.testHostname = "different-hostname.test"
+	destination.URL = "https://different-hostname.test:" + port + "/notify"
+	_, err = sender.Send(t.Context(), task, destination)
+	if err == nil {
+		t.Fatal("expected TLS hostname verification failure")
 	}
-	if connections.Load() != 1 || requests.Load() != 1 {
-		t.Fatalf("connections = %d, requests = %d, want one and one", connections.Load(), requests.Load())
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), body) {
+		t.Fatalf("TLS error exposed secret or body: %q", err)
 	}
 }
 

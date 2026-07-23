@@ -279,6 +279,7 @@ func validateStoredHeaders(headers map[string]string, destination delivery.Desti
 	for _, name := range destination.AllowedHeaders {
 		allowed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
+	seen := make(map[string]struct{}, len(headers))
 	protected := map[string]struct{}{
 		"authorization":       {},
 		"proxy-authorization": {},
@@ -302,6 +303,10 @@ func validateStoredHeaders(headers map[string]string, destination delivery.Desti
 			strings.ContainsAny(headers[name], "\r\n") {
 			return errors.New("stored delivery contains an invalid Header")
 		}
+		if _, duplicate := seen[canonical]; duplicate {
+			return errors.New("stored delivery contains a case-insensitive duplicate Header")
+		}
+		seen[canonical] = struct{}{}
 		if _, denied := protected[canonical]; denied {
 			return errors.New("stored delivery contains a protected Header")
 		}
