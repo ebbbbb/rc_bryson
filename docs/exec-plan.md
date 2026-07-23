@@ -76,6 +76,10 @@ Independent verification:
   ID/version, uppercase method, canonical sorted caller headers, and raw body
   bytes, while excluding all three idempotency/credential fields.
 - Unauthorized destinations and payloads over 256 KiB are rejected.
+- The configurable global active backlog defaults to 100,000 `pending` plus
+  `delivering` rows. At capacity a new submission returns `503`,
+  `backlog_capacity_exceeded`, and `Retry-After: 60`, while an idempotent retry
+  still resolves the original delivery.
 
 Stop condition: the acceptance cases pass against a real PostgreSQL instance,
 including forced commit failure and concurrent idempotency races. Evidence command:

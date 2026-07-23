@@ -1,0 +1,310 @@
+package delivery
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const (
+	maxDeliveryPayloadBytes = 256 * 1024
+	maxSubmissionJSONBytes  = 512 * 1024
+)
+
+type API struct {
+	store  *Store
+	logger *slog.Logger
+	now    func() time.Time
+}
+
+func NewAPI(store *Store, logger *slog.Logger) (*API, error) {
+	if store == nil {
+		return nil, errors.New("delivery API requires a store")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &API{
+		store:  store,
+		logger: logger,
+		now:    time.Now,
+	}, nil
+}
+
+func (api *API) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /deliveries", api.submit)
+	mux.HandleFunc("GET /deliveries/{id}", api.get)
+}
+
+type submissionRequest struct {
+	DestinationID string            `json:"destination_id"`
+	Method        string            `json:"method"`
+	Headers       map[string]string `json:"headers"`
+	BodyBase64    string            `json:"body_base64"`
+}
+
+type deliveryResponse struct {
+	ID                 string    `json:"id"`
+	Status             string    `json:"status"`
+	DestinationID      string    `json:"destination_id"`
+	DestinationVersion int64     `json:"destination_version"`
+	Generation         int64     `json:"generation"`
+	AcceptedAt         time.Time `json:"accepted_at"`
+	NextAttemptAt      time.Time `json:"next_attempt_at"`
+	RetryDeadline      time.Time `json:"retry_deadline"`
+}
+
+func (api *API) submit(response http.ResponseWriter, request *http.Request) {
+	callerID, ok := api.authenticate(response, request)
+	if !ok {
+		return
+	}
+
+	idempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" || len(idempotencyKey) > 200 {
+		writeError(response, http.StatusBadRequest, "invalid_idempotency_key", "Idempotency-Key is required")
+		return
+	}
+
+	request.Body = http.MaxBytesReader(response, request.Body, maxSubmissionJSONBytes)
+	var input submissionRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		if isRequestTooLarge(err) {
+			writeError(response, http.StatusRequestEntityTooLarge, "payload_too_large", "request exceeds size limit")
+			return
+		}
+		writeError(response, http.StatusBadRequest, "invalid_request", "request body is invalid")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request", "request body must contain one JSON value")
+		return
+	}
+
+	body, err := base64.StdEncoding.DecodeString(input.BodyBase64)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_body_encoding", "body_base64 is invalid")
+		return
+	}
+	canonicalHeaders, err := CanonicalCallerHeaders(input.Headers)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_headers", "caller Header names must be unique")
+		return
+	}
+	if payloadSize(canonicalHeaders, body) > maxDeliveryPayloadBytes {
+		writeError(response, http.StatusRequestEntityTooLarge, "payload_too_large", "Header and Body payload exceeds 256 KiB")
+		return
+	}
+
+	destination, err := api.store.AuthorizedDestination(request.Context(), callerID, input.DestinationID)
+	if err != nil {
+		if errors.Is(err, ErrDestinationDenied) {
+			writeError(response, http.StatusForbidden, "destination_forbidden", "destination is not authorized")
+			return
+		}
+		api.internalError(response, "resolve_destination", err)
+		return
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(input.Method))
+	if !containsFold(destination.AllowedMethods, method) {
+		writeError(response, http.StatusBadRequest, "method_not_allowed", "method is not allowed for destination")
+		return
+	}
+	if err := validateCallerHeaders(canonicalHeaders, destination); err != nil {
+		writeError(response, http.StatusBadRequest, "header_not_allowed", err.Error())
+		return
+	}
+
+	requestHash, err := RequestHash(HashInput{
+		DestinationID:      destination.DestinationID,
+		DestinationVersion: destination.Version,
+		Method:             method,
+		CallerHeaders:      canonicalHeaders,
+		Body:               body,
+	})
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request", "request cannot be canonicalized")
+		return
+	}
+
+	acceptedAt := api.now().UTC()
+	delivery, err := api.store.Submit(request.Context(), Submission{
+		CallerID:           callerID,
+		IdempotencyKey:     idempotencyKey,
+		RequestHash:        requestHash,
+		DestinationID:      destination.DestinationID,
+		DestinationVersion: destination.Version,
+		Method:             method,
+		CallerHeaders:      canonicalHeaders,
+		Body:               body,
+		AcceptedAt:         acceptedAt,
+		RetryDeadline:      acceptedAt.Add(24 * time.Hour),
+	})
+	switch {
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeError(response, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with different content")
+		return
+	case errors.Is(err, ErrBacklogCapacity):
+		response.Header().Set("Retry-After", "60")
+		writeError(response, http.StatusServiceUnavailable, "backlog_capacity_exceeded", "active delivery backlog is full")
+		return
+	case err != nil:
+		api.internalError(response, "submit_delivery", err)
+		return
+	}
+
+	writeJSON(response, http.StatusAccepted, responseFromDelivery(delivery))
+}
+
+func (api *API) get(response http.ResponseWriter, request *http.Request) {
+	callerID, ok := api.authenticate(response, request)
+	if !ok {
+		return
+	}
+	delivery, err := api.store.Get(request.Context(), callerID, request.PathValue("id"))
+	if errors.Is(err, ErrNotFound) {
+		writeError(response, http.StatusNotFound, "delivery_not_found", "delivery was not found")
+		return
+	}
+	if err != nil {
+		api.internalError(response, "get_delivery", err)
+		return
+	}
+	writeJSON(response, http.StatusOK, responseFromDelivery(delivery))
+}
+
+func (api *API) authenticate(response http.ResponseWriter, request *http.Request) (string, bool) {
+	authorization := request.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(authorization, prefix) || len(authorization) == len(prefix) {
+		writeError(response, http.StatusUnauthorized, "unauthorized", "valid caller authentication is required")
+		return "", false
+	}
+	callerID, err := api.store.Authenticate(request.Context(), authorization[len(prefix):])
+	if errors.Is(err, ErrUnauthorized) {
+		writeError(response, http.StatusUnauthorized, "unauthorized", "valid caller authentication is required")
+		return "", false
+	}
+	if err != nil {
+		api.internalError(response, "authenticate_caller", err)
+		return "", false
+	}
+	return callerID, true
+}
+
+func (api *API) internalError(response http.ResponseWriter, operation string, err error) {
+	api.logger.Error("request failed", "operation", operation, "error", errorCategory(err))
+	writeError(response, http.StatusServiceUnavailable, "service_unavailable", "service is temporarily unavailable")
+}
+
+func responseFromDelivery(delivery Delivery) deliveryResponse {
+	return deliveryResponse{
+		ID:                 delivery.ID,
+		Status:             delivery.Status,
+		DestinationID:      delivery.DestinationID,
+		DestinationVersion: delivery.DestinationVersion,
+		Generation:         delivery.Generation,
+		AcceptedAt:         delivery.AcceptedAt,
+		NextAttemptAt:      delivery.NextAttemptAt,
+		RetryDeadline:      delivery.RetryDeadline,
+	}
+}
+
+func validateCallerHeaders(headers map[string]string, destination DestinationVersion) error {
+	allowed := make(map[string]struct{}, len(destination.AllowedHeaders))
+	for _, name := range destination.AllowedHeaders {
+		allowed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	protected := map[string]struct{}{
+		"authorization":       {},
+		"proxy-authorization": {},
+		"host":                {},
+		"connection":          {},
+		"keep-alive":          {},
+		"proxy-authenticate":  {},
+		"te":                  {},
+		"trailer":             {},
+		"transfer-encoding":   {},
+		"upgrade":             {},
+		"cookie":              {},
+		"set-cookie":          {},
+		"content-length":      {},
+		strings.ToLower(destination.IdempotencyHeader): {},
+	}
+	for name := range headers {
+		if _, denied := protected[name]; denied {
+			return errors.New("caller attempted to set a protected Header")
+		}
+		if _, ok := allowed[name]; !ok {
+			return errors.New("caller Header is not allowlisted")
+		}
+	}
+	return nil
+}
+
+func containsFold(values []string, candidate string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func payloadSize(headers map[string]string, body []byte) int {
+	size := len(body)
+	for name, value := range headers {
+		size += len(name) + len(value)
+	}
+	return size
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	err := decoder.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err == nil {
+		return errors.New("multiple JSON values")
+	}
+	return err
+}
+
+func isRequestTooLarge(err error) bool {
+	var maxBytesError *http.MaxBytesError
+	return errors.As(err, &maxBytesError)
+}
+
+func errorCategory(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "request_canceled"
+	default:
+		return "internal"
+	}
+}
+
+func writeError(response http.ResponseWriter, status int, code, message string) {
+	writeJSON(response, status, map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+func writeJSON(response http.ResponseWriter, status int, value any) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(status)
+	_ = json.NewEncoder(response).Encode(value)
+}

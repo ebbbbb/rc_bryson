@@ -127,6 +127,12 @@ durability guarantee.
   original acceptance time or logical identity.
 - Payload size is capped at 256 KiB; successful and permanently failed records use
   7-day and 30-day retention respectively.
+- The global active backlog limit defaults to 100,000 and counts `pending` plus
+  `delivering` deliveries. It is configurable but is not an SLO. At capacity,
+  `POST /deliveries` returns `503`, error code `backlog_capacity_exceeded`, and
+  `Retry-After: 60`; an idempotent retry of an already accepted request still
+  returns the original delivery.
+- The MVP onboards only suppliers with a stable idempotency mechanism.
 - ADR 0004 selects standard-library HTTP/testing, pgx, amqp091-go, golang-migrate,
   and Prometheus client on the approved base stack.
 - ADR 0005 requires test-first red–green–refactor execution for every business
@@ -150,11 +156,7 @@ durability guarantee.
 
 - The production secret manager, egress-control product, high-availability
   topology, backup policy, and recovery objectives.
-- Exact reviewed module/tool versions are pinned during the toolchain gate without
-  reopening ADR 0004's selected packages.
-- Admission backlog threshold and the capacity model used to approve a latency SLO.
-- Whether a supplier without idempotency support may be onboarded under an explicit
-  business risk exception.
+- The capacity model used to evaluate a latency SLO.
 
 The proposed first-attempt target of `p99 <= 60 seconds` is not yet an unconditional
 guarantee. It can apply only while dependencies are healthy, admission backpressure

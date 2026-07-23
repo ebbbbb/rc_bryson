@@ -43,8 +43,11 @@ verify-gate: preflight
 
 verify-slice:
 	@test -n "$(SLICE)" || (echo "SLICE is required" >&2; exit 2)
-	@test "$(SLICE)" = "0" || (echo "slice $(SLICE) is not implemented in stage 2.6" >&2; exit 2)
-	$(MAKE) verify-gate
+	@case "$(SLICE)" in \
+		0) $(MAKE) verify-gate ;; \
+		1) $(GO_RUN) test ./internal/delivery && $(MAKE) integration ;; \
+		*) echo "slice $(SLICE) is not implemented" >&2; exit 2 ;; \
+	esac
 
 validate-skills:
 	docker build --quiet -f .agents/tools/Dockerfile -t $(SKILL_VALIDATOR_IMAGE) .

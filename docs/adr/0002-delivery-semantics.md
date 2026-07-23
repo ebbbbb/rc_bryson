@@ -23,6 +23,8 @@ Promise durable acceptance and at-least-once delivery, not exactly-once effects.
   idempotency Header, and injected credential.
 - Assign a stable supplier idempotency value to each logical delivery and inject it
   according to the destination configuration.
+- Do not onboard a supplier into the MVP unless its API exposes a stable
+  idempotency mechanism.
 - Mark success only after a configured successful HTTP response and a committed
   success transition.
 - Use finite Worker leases. An expired lease is reclaimable.
@@ -53,8 +55,7 @@ replay; and appends an operator, reason, and timestamp to the audit record.
 - An expired Worker cannot overwrite a newer result because its generation or lease
   fencing values no longer match.
 - A duplicate HTTP send is still possible after an ambiguous attempt.
-- Suppliers without idempotency support cannot receive an exactly-once guarantee
-  and require an explicit risk exception before onboarding.
+- Suppliers without idempotency support are outside the MVP.
 - No event ordering is guaranteed.
 - “Succeeded” means the supplier returned an accepted response, not that its
   downstream business operation completed.

@@ -37,6 +37,22 @@ services:
     networks:
       - backend
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    command:
+      - -path
+      - /migrations
+      - -database
+      - postgres://notifier:notifier-test-only@postgres:5432/notifier?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
   fake-supplier:
     build:
       context: .
@@ -79,7 +95,17 @@ services:
         PACKAGE: ./cmd/notifier
     ports:
       - "${APP_PORT:-18080}:8080"
+    environment:
+      DATABASE_URL: postgres://notifier:notifier-test-only@postgres:5432/notifier?sslmode=disable
+      BACKLOG_LIMIT: "${BACKLOG_LIMIT:-100000}"
+      BOOTSTRAP_LOCAL_CONFIG: "true"
+      BOOTSTRAP_CALLER_ID: caller-a
+      BOOTSTRAP_CALLER_API_KEY: caller-a-test-key
+      BOOTSTRAP_DESTINATION_ID: supplier-a
+      BOOTSTRAP_DESTINATION_URL: https://fake-supplier.test:8443/notify
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:

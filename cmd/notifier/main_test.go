@@ -12,7 +12,7 @@ func TestHealthEndpoints(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			response := httptest.NewRecorder()
 
-			newMux().ServeHTTP(response, request)
+			newMux(nil, nil).ServeHTTP(response, request)
 
 			if response.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)

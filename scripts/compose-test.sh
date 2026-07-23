@@ -41,8 +41,40 @@ test "$(docker inspect --format '{{.State.Health.Status}}' "$app_container")" = 
 echo "PASS final app image starts and reports healthy"
 
 if [ "$mode" = "integration" ]; then
+	postgres_endpoint=$(compose port postgres 5432)
+	postgres_port=${postgres_endpoint##*:}
 	APP_HEALTH_URL="http://127.0.0.1:$app_port/healthz" \
+		DATABASE_URL="postgres://notifier:notifier-test-only@127.0.0.1:$postgres_port/notifier?sslmode=disable" \
 		go test -tags=integration ./test/integration
+	persistence_key="restart-$(date +%s)-$$"
+	persistence_payload='{"destination_id":"supplier-a","method":"POST","headers":{"Content-Type":"application/json","X-Event-Type":"restart"},"body_base64":"e30="}'
+	persistence_response=$(
+		curl --noproxy '*' --fail --silent --show-error \
+			-H "Authorization: Bearer caller-a-test-key" \
+			-H "Idempotency-Key: $persistence_key" \
+			-H "Content-Type: application/json" \
+			--data "$persistence_payload" \
+			"http://127.0.0.1:$app_port/deliveries"
+	)
+	persistence_id=$(printf '%s' "$persistence_response" | jq -er '.id')
+	compose restart app >/dev/null
+	compose up -d --wait --wait-timeout 120 app >/dev/null
+	persisted_status=
+	attempt=0
+	while [ "$attempt" -lt 20 ]; do
+		if persisted_response=$(
+			compose exec -T app wget -q -O - \
+				--header "Authorization: Bearer caller-a-test-key" \
+				"http://127.0.0.1:8080/deliveries/$persistence_id"
+		); then
+			persisted_status=$(printf '%s' "$persisted_response" | jq -er '.status')
+			break
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.25
+	done
+	test "$persisted_status" = "pending"
+	echo "PASS accepted delivery remains queryable after app restart"
 	echo "PASS isolated Compose service integration"
 	exit 0
 fi

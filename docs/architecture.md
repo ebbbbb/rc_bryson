@@ -94,6 +94,13 @@ Metrics and redacted structured logs expose state transitions and failure classe
 Maintenance removes only terminal records after their retention period and applies
 admission backpressure when configured backlog limits are reached.
 
+Admission serializes the idempotency lookup and active-count decision in the
+submission transaction. The default global limit is 100,000 rows whose state is
+`pending` or `delivering`. The value is configurable and does not imply a latency
+SLO. A new request at capacity receives `503 backlog_capacity_exceeded` with
+`Retry-After: 60`; lookup of an already accepted idempotency key occurs before the
+capacity decision.
+
 ## State model
 
 The persisted states are:
@@ -261,3 +268,7 @@ backpressure is inactive; the supplier is responsive; and arrival rate plus
 existing backlog fit the configured destination rate/concurrency. With the default
 one request per second, 60 queued requests for one destination are already
 incompatible with an unconditional `p99 <= 60 seconds` claim.
+
+The MVP rejects onboarding a destination without a stable supplier idempotency
+mechanism. Production secret management, production egress enforcement, HA,
+backup, and RTO/RPO design remain outside the local MVP.

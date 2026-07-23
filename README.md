@@ -8,10 +8,10 @@ persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** the repository currently contains the engineering
-> contracts, application skeleton, and verified development toolchain. Delivery,
-> Outbox, Worker, retry, replay, and business schema implementation will be added
-> through the test-first slices in `docs/exec-plan.md`. This is not yet a
+> **Project status:** Slice 1 provides durable submission, caller idempotency,
+> registered destination authorization, status lookup, and admission backpressure.
+> Queue publication, supplier delivery, retry, replay, reconciliation, and
+> production operations remain planned in `docs/exec-plan.md`. This is not yet a
 > production-ready notification service.
 
 ## Design at a glance
@@ -32,7 +32,8 @@ side effects cannot be guaranteed exactly once.
 ```text
 cmd/                 Application and test-probe entry points
 docs/                Product specification, architecture, ADRs, and execution plan
-internal/toolchain/  Toolchain dependency anchors only
+internal/             Delivery implementation and toolchain dependency anchors
+migrations/           Ordered PostgreSQL schema migrations
 test/                Integration-test entry points
 testdata/            Test-only TLS fixtures
 .agents/skills/      Repository development workflows
