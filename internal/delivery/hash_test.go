@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -103,5 +104,17 @@ func TestRequestHashRejectsCaseInsensitiveDuplicateHeaders(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected duplicate caller Header rejection")
+	}
+}
+
+func TestCanonicalCallerHeadersRejectsInvalidWireValues(t *testing.T) {
+	for _, headers := range []map[string]string{
+		{"bad header": "value"},
+		{"x-event": "safe\r\nAuthorization: leaked"},
+		{"": "value"},
+	} {
+		if _, err := CanonicalCallerHeaders(headers); !errors.Is(err, ErrInvalidHeader) {
+			t.Fatalf("headers %v error = %v, want ErrInvalidHeader", headers, err)
+		}
 	}
 }

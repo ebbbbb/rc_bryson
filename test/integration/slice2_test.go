@@ -546,6 +546,9 @@ func compose(t *testing.T, args ...string) {
 	if err != nil {
 		t.Fatalf("docker compose %v: %v\n%s", args, err, output)
 	}
+	if containsArgument(args, "app") && containsArgument(args, "up") {
+		refreshAppURL(t)
+	}
 }
 
 func composeCleanup(t *testing.T, args ...string) {
@@ -560,7 +563,42 @@ func composeCleanup(t *testing.T, args ...string) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Errorf("cleanup docker compose %v: %v\n%s", args, err, output)
+	} else if containsArgument(args, "app") && containsArgument(args, "up") {
+		refreshAppURL(t)
 	}
+}
+
+func refreshAppURL(t *testing.T) {
+	t.Helper()
+	command := exec.Command(
+		"docker",
+		"compose",
+		"--project-name", requiredEnv(t, "COMPOSE_PROJECT_NAME"),
+		"--project-directory", requiredEnv(t, "REPO_ROOT"),
+		"port",
+		"app",
+		"8080",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve app port: %v\n%s", err, output)
+	}
+	_, port, err := net.SplitHostPort(strings.TrimSpace(string(output)))
+	if err != nil {
+		t.Fatalf("parse app port %q: %v", output, err)
+	}
+	if err := os.Setenv("APP_HEALTH_URL", "http://127.0.0.1:"+port+"/healthz"); err != nil {
+		t.Fatalf("update app URL: %v", err)
+	}
+}
+
+func containsArgument(args []string, expected string) bool {
+	for _, argument := range args {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func requiredEnv(t *testing.T, name string) string {

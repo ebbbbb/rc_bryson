@@ -20,6 +20,9 @@ export POSTGRES_PORT=0
 export RABBITMQ_PORT=0
 export RABBITMQ_MANAGEMENT_PORT=0
 export APP_PORT=0
+if [ "$mode" = "integration" ]; then
+	export WORKER_ENABLED=false
+fi
 
 compose() {
 	docker compose --project-name "$project" --project-directory "$repo_root" "$@"

@@ -239,6 +239,7 @@ func validateCallerHeaders(headers map[string]string, destination DestinationVer
 		"set-cookie":          {},
 		"content-length":      {},
 		strings.ToLower(destination.IdempotencyHeader): {},
+		strings.ToLower(destination.CredentialHeader):  {},
 	}
 	for name := range headers {
 		if _, denied := protected[name]; denied {

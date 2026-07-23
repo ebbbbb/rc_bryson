@@ -95,6 +95,14 @@ func main() {
 			logger,
 		)
 	}
+	if envOr("WORKER_ENABLED", "true") == "true" {
+		go runWorker(
+			ctx,
+			store,
+			envOr("RABBITMQ_URL", "amqp://notifier:notifier-test-only@localhost:15672/"),
+			logger,
+		)
+	}
 
 	errs := make(chan error, 1)
 	go func() {
@@ -129,6 +137,7 @@ func localBootstrapConfig() delivery.BootstrapConfig {
 			AllowedMethods:    []string{http.MethodPost},
 			AllowedHeaders:    []string{"content-type", "x-event-type"},
 			SecretRef:         "env:SUPPLIER_AUTH_VALUE",
+			CredentialHeader:  "Authorization",
 			IdempotencyHeader: "Idempotency-Key",
 			SuccessStatuses:   []int32{},
 			RetryStatuses:     []int32{408, 425, 429},

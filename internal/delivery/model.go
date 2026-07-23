@@ -28,6 +28,7 @@ type DestinationVersion struct {
 	AllowedMethods    []string
 	AllowedHeaders    []string
 	SecretRef         string
+	CredentialHeader  string
 	IdempotencyHeader string
 	SuccessStatuses   []int32
 	RetryStatuses     []int32
@@ -51,6 +52,9 @@ type Delivery struct {
 	AcceptedAt               time.Time
 	RetryDeadline            time.Time
 	NextAttemptAt            time.Time
+	LeaseOwner               string
+	LeaseToken               string
+	LeaseUntil               time.Time
 }
 
 type Submission struct {

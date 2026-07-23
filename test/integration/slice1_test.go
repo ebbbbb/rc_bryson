@@ -35,6 +35,7 @@ type deliveryResponse struct {
 	Status             string `json:"status"`
 	DestinationID      string `json:"destination_id"`
 	DestinationVersion int64  `json:"destination_version"`
+	Generation         int64  `json:"generation"`
 }
 
 type errorResponse struct {

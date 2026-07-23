@@ -64,6 +64,7 @@ func (store *Store) AuthorizedDestination(
 			version.allowed_methods,
 			version.allowed_headers,
 			version.secret_ref,
+			version.credential_header,
 			version.idempotency_header,
 			version.success_statuses,
 			version.retry_statuses,
@@ -87,6 +88,7 @@ func (store *Store) AuthorizedDestination(
 		&destination.AllowedMethods,
 		&destination.AllowedHeaders,
 		&destination.SecretRef,
+		&destination.CredentialHeader,
 		&destination.IdempotencyHeader,
 		&destination.SuccessStatuses,
 		&destination.RetryStatuses,
@@ -292,6 +294,7 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 			allowed_methods,
 			allowed_headers,
 			secret_ref,
+			credential_header,
 			idempotency_header,
 			success_statuses,
 			retry_statuses,
@@ -301,7 +304,7 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 			max_concurrency
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 		)
 		ON CONFLICT (destination_id, version) DO NOTHING
 	`,
@@ -312,6 +315,7 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 		config.Destination.AllowedMethods,
 		config.Destination.AllowedHeaders,
 		config.Destination.SecretRef,
+		config.Destination.CredentialHeader,
 		config.Destination.IdempotencyHeader,
 		config.Destination.SuccessStatuses,
 		config.Destination.RetryStatuses,

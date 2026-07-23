@@ -10,7 +10,10 @@ import (
 	"strings"
 )
 
-var ErrDuplicateHeader = errors.New("caller Header names must be unique case-insensitively")
+var (
+	ErrDuplicateHeader = errors.New("caller Header names must be unique case-insensitively")
+	ErrInvalidHeader   = errors.New("caller Header name or value is invalid")
+)
 
 type HashInput struct {
 	DestinationID      string
@@ -50,12 +53,38 @@ func CanonicalCallerHeaders(input map[string]string) (map[string]string, error) 
 	headers := make(map[string]string, len(input))
 	for rawName, rawValue := range input {
 		name := strings.ToLower(strings.TrimSpace(rawName))
+		if !validHeaderName(name) || !validHeaderValue(rawValue) {
+			return nil, ErrInvalidHeader
+		}
 		if _, exists := headers[name]; exists {
 			return nil, ErrDuplicateHeader
 		}
 		headers[name] = trimOptionalWhitespace(rawValue)
 	}
 	return headers, nil
+}
+
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const separators = "()<>@,;:\\\"/[]?={} \t"
+	for _, character := range name {
+		if character < 33 || character > 126 || strings.ContainsRune(separators, character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validHeaderValue(value string) bool {
+	for _, character := range value {
+		if character == '\r' || character == '\n' || character == 0x7f ||
+			(character < 0x20 && character != '\t') {
+			return false
+		}
+	}
+	return true
 }
 
 func writeHashField(digest hash.Hash, value []byte) {
