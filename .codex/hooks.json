@@ -1,0 +1,47 @@
+{
+  "description": "Repository-local Go formatting and verification gates.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/format-go.sh\"",
+            "timeout": 10,
+            "statusMessage": "Formatting changed Go files"
+          },
+          {
+            "type": "command",
+            "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" track",
+            "timeout": 8,
+            "statusMessage": "Tracking production Go changes"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" record-verification",
+            "timeout": 8,
+            "statusMessage": "Recording successful repository verification"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" stop",
+            "timeout": 8,
+            "statusMessage": "Checking repository verification state"
+          }
+        ]
+      }
+    ]
+  }
+}

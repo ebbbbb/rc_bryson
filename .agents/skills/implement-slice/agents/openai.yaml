@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Slice"
+  short_description: "Test-first execution of one approved vertical slice"
+  default_prompt: "Use $implement-slice to implement the requested exec-plan slice with red, green, and verification evidence."

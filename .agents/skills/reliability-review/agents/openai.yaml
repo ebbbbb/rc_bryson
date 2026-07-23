@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reliability Review"
+  short_description: "Review reliability and security failure paths"
+  default_prompt: "Use $reliability-review to inspect this change for concrete reliability and network-security failures."

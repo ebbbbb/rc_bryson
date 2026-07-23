@@ -1,0 +1,8 @@
+{
+  "prompt": "Implement slice 3 from docs/exec-plan.md and show test-first evidence.",
+  "expected": [
+    "reads slice contracts before editing",
+    "observes a behavior-missing red before production changes",
+    "reports targeted green and regression verification"
+  ]
+}

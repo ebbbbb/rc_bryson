@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify"
+  short_description: "Run layered Go verification before task completion"
+  default_prompt: "Use $verify to run the repository verification layers and report concise evidence."

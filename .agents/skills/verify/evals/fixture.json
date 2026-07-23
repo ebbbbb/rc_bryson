@@ -1,0 +1,8 @@
+{
+  "prompt": "The change is ready. Verify it before declaring completion.",
+  "expected": [
+    "uses make verify as the sole completion command",
+    "diagnoses a failing layer without running a second full verification merely to clear hook state",
+    "reports the real make verify exit result and layer evidence"
+  ]
+}

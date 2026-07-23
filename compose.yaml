@@ -1,0 +1,104 @@
+name: reliable-notifier
+
+services:
+  postgres:
+    image: postgres:18.2-alpine@sha256:035b9ab53cfa147d7202b61f5f7782b939ae815b7d6bc81c96b7b42ff1fca950
+    environment:
+      POSTGRES_DB: notifier
+      POSTGRES_USER: notifier
+      POSTGRES_PASSWORD: notifier-test-only
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notifier -d notifier"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - backend
+
+  rabbitmq:
+    image: rabbitmq:4.2.4-management-alpine@sha256:adac51a4a14a200b8eb928a12787564ed56e93fc55e789a73ec13e1e2eac7aef
+    environment:
+      RABBITMQ_DEFAULT_USER: notifier
+      RABBITMQ_DEFAULT_PASS: notifier-test-only
+    ports:
+      - "${RABBITMQ_PORT:-15672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-25672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    networks:
+      - backend
+
+  fake-supplier:
+    build:
+      context: .
+      args:
+        PACKAGE: ./cmd/fake-supplier
+    environment:
+      TLS_CERT_FILE: /certs/fake-supplier.crt
+      TLS_KEY_FILE: /certs/fake-supplier.key
+    volumes:
+      - ./testdata/certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://localhost:8443/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      supplier-test:
+        aliases:
+          - fake-supplier.test
+
+  safe-dial-probe:
+    profiles: ["tools"]
+    build:
+      context: .
+      args:
+        PACKAGE: ./cmd/toolchain-probe
+    command: ["http-tls"]
+    environment:
+      FAKE_SUPPLIER_URL: https://fake-supplier.test:8443/healthz
+      FAKE_SUPPLIER_CA_FILE: /certs/test-ca.crt
+    volumes:
+      - ./testdata/certs/test-ca.crt:/certs/test-ca.crt:ro
+    networks:
+      - supplier-test
+
+  app:
+    build:
+      context: .
+      args:
+        PACKAGE: ./cmd/notifier
+    ports:
+      - "${APP_PORT:-18080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - backend
+
+networks:
+  backend:
+  supplier-test:
+    internal: true
+    labels:
+      reliable-notifier.policy: test-only
+
+volumes:
+  postgres-data:
+  rabbitmq-data:

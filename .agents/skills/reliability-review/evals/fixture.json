@@ -1,0 +1,8 @@
+{
+  "prompt": "Review a worker retry change that moves generation and ACK handling.",
+  "expected": [
+    "traces commit and ACK crash windows",
+    "checks lease fencing and stale generations",
+    "reports only concrete execution paths"
+  ]
+}
