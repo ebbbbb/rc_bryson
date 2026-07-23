@@ -49,6 +49,7 @@ verify-slice:
 		2) $(GO_RUN) test ./internal/delivery ./internal/dispatch && $(MAKE) integration ;; \
 		3) $(GO_RUN) test ./internal/delivery ./internal/outbound ./internal/worker && $(MAKE) integration ;; \
 		4) $(GO_RUN) test ./internal/delivery ./internal/outbound ./internal/worker && $(MAKE) integration ;; \
+		5) $(GO_RUN) test ./internal/delivery && $(MAKE) integration ;; \
 		*) echo "slice $(SLICE) is not implemented" >&2; exit 2 ;; \
 	esac
 

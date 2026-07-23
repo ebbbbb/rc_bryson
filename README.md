@@ -8,11 +8,12 @@ persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** Slices 1–4 provide durable submission, caller idempotency,
+> **Project status:** Slices 1–5 provide durable submission, caller idempotency,
 > registered destination authorization, status lookup, admission backpressure,
 > confirmed Outbox-to-RabbitMQ dispatch, and fenced HTTPS success delivery with
 > the minimum SSRF boundary, classified results, bounded retry scheduling, lease
-> recovery, and single-instance destination limits. Replay and production operations remain planned in
+> recovery, single-instance destination limits, permanent failure, and audited
+> operator replay. Security hardening and production operations remain planned in
 > `docs/exec-plan.md`. This is not yet a production-ready notification service.
 
 ## Design at a glance

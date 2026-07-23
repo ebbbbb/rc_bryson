@@ -31,20 +31,28 @@ func NewStore(pool *pgxpool.Pool, backlogLimit int64) (*Store, error) {
 }
 
 func (store *Store) Authenticate(ctx context.Context, apiKey string) (string, error) {
+	principal, err := store.AuthenticatePrincipal(ctx, apiKey)
+	if err != nil {
+		return "", err
+	}
+	return principal.CallerID, nil
+}
+
+func (store *Store) AuthenticatePrincipal(ctx context.Context, apiKey string) (Principal, error) {
 	digest := sha256.Sum256([]byte(apiKey))
-	var callerID string
+	var principal Principal
 	err := store.pool.QueryRow(ctx, `
-		SELECT id
+		SELECT id, is_operator
 		FROM callers
 		WHERE api_key_hash = $1
-	`, digest[:]).Scan(&callerID)
+	`, digest[:]).Scan(&principal.CallerID, &principal.IsOperator)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrUnauthorized
+		return Principal{}, ErrUnauthorized
 	}
 	if err != nil {
-		return "", fmt.Errorf("authenticate caller: %w", err)
+		return Principal{}, fmt.Errorf("authenticate principal: %w", err)
 	}
-	return callerID, nil
+	return principal, nil
 }
 
 func (store *Store) AuthorizedDestination(

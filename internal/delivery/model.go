@@ -18,7 +18,13 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different content")
 	ErrBacklogCapacity     = errors.New("active delivery backlog capacity exceeded")
 	ErrNotFound            = errors.New("delivery not found")
+	ErrReplayConflict      = errors.New("only a permanently failed delivery can be replayed")
 )
+
+type Principal struct {
+	CallerID   string
+	IsOperator bool
+}
 
 type DestinationVersion struct {
 	DestinationID     string

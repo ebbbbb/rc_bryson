@@ -40,6 +40,7 @@ func NewAPI(store *Store, logger *slog.Logger) (*API, error) {
 func (api *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /deliveries", api.submit)
 	mux.HandleFunc("GET /deliveries/{id}", api.get)
+	mux.HandleFunc("POST /deliveries/{id}/replay", api.replay)
 }
 
 type submissionRequest struct {
@@ -182,23 +183,80 @@ func (api *API) get(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, responseFromDelivery(delivery))
 }
 
+type replayRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (api *API) replay(response http.ResponseWriter, request *http.Request) {
+	principal, ok := api.authenticatePrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !principal.IsOperator {
+		writeError(response, http.StatusForbidden, "operator_required", "operator authorization is required")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 4096)
+	var input replayRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || ensureJSONEOF(decoder) != nil {
+		writeError(response, http.StatusBadRequest, "invalid_replay", "replay request is invalid")
+		return
+	}
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" || len(reason) > 1000 {
+		writeError(response, http.StatusBadRequest, "invalid_replay_reason", "reason must contain 1 to 1000 bytes")
+		return
+	}
+	replayed, err := api.store.Replay(
+		request.Context(),
+		request.PathValue("id"),
+		principal.CallerID,
+		reason,
+	)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(response, http.StatusNotFound, "delivery_not_found", "delivery was not found")
+		return
+	case errors.Is(err, ErrReplayConflict):
+		writeError(response, http.StatusConflict, "delivery_not_replayable", "delivery is not permanently failed")
+		return
+	case err != nil:
+		api.internalError(response, "replay_delivery", err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, responseFromDelivery(replayed))
+}
+
 func (api *API) authenticate(response http.ResponseWriter, request *http.Request) (string, bool) {
+	principal, ok := api.authenticatePrincipal(response, request)
+	if !ok {
+		return "", false
+	}
+	return principal.CallerID, true
+}
+
+func (api *API) authenticatePrincipal(
+	response http.ResponseWriter,
+	request *http.Request,
+) (Principal, bool) {
 	authorization := request.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(authorization, prefix) || len(authorization) == len(prefix) {
 		writeError(response, http.StatusUnauthorized, "unauthorized", "valid caller authentication is required")
-		return "", false
+		return Principal{}, false
 	}
-	callerID, err := api.store.Authenticate(request.Context(), authorization[len(prefix):])
+	principal, err := api.store.AuthenticatePrincipal(request.Context(), authorization[len(prefix):])
 	if errors.Is(err, ErrUnauthorized) {
 		writeError(response, http.StatusUnauthorized, "unauthorized", "valid caller authentication is required")
-		return "", false
+		return Principal{}, false
 	}
 	if err != nil {
 		api.internalError(response, "authenticate_caller", err)
-		return "", false
+		return Principal{}, false
 	}
-	return callerID, true
+	return principal, true
 }
 
 func (api *API) internalError(response http.ResponseWriter, operation string, err error) {
