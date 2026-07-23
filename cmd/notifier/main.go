@@ -87,6 +87,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if envOr("PUBLISHER_ENABLED", "true") == "true" {
+		go runPublisher(
+			ctx,
+			store,
+			envOr("RABBITMQ_URL", "amqp://notifier:notifier-test-only@localhost:15672/"),
+			logger,
+		)
+	}
 
 	errs := make(chan error, 1)
 	go func() {

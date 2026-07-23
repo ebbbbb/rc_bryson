@@ -97,6 +97,8 @@ services:
       - "${APP_PORT:-18080}:8080"
     environment:
       DATABASE_URL: postgres://notifier:notifier-test-only@postgres:5432/notifier?sslmode=disable
+      RABBITMQ_URL: amqp://notifier:notifier-test-only@rabbitmq:5672/
+      PUBLISHER_ENABLED: "${PUBLISHER_ENABLED:-true}"
       BACKLOG_LIMIT: "${BACKLOG_LIMIT:-100000}"
       BOOTSTRAP_LOCAL_CONFIG: "true"
       BOOTSTRAP_CALLER_ID: caller-a

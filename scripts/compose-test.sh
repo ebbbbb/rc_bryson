@@ -43,9 +43,16 @@ echo "PASS final app image starts and reports healthy"
 if [ "$mode" = "integration" ]; then
 	postgres_endpoint=$(compose port postgres 5432)
 	postgres_port=${postgres_endpoint##*:}
+	rabbit_endpoint=$(compose port rabbitmq 5672)
+	rabbit_port=${rabbit_endpoint##*:}
 	APP_HEALTH_URL="http://127.0.0.1:$app_port/healthz" \
+		COMPOSE_PROJECT_NAME="$project" \
 		DATABASE_URL="postgres://notifier:notifier-test-only@127.0.0.1:$postgres_port/notifier?sslmode=disable" \
+		RABBITMQ_URL="amqp://notifier:notifier-test-only@127.0.0.1:$rabbit_port/" \
+		REPO_ROOT="$repo_root" \
 		go test -tags=integration ./test/integration
+	app_endpoint=$(compose port app 8080)
+	app_port=${app_endpoint##*:}
 	persistence_key="restart-$(date +%s)-$$"
 	persistence_payload='{"destination_id":"supplier-a","method":"POST","headers":{"Content-Type":"application/json","X-Event-Type":"restart"},"body_base64":"e30="}'
 	persistence_response=$(

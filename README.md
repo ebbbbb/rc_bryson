@@ -8,11 +8,11 @@ persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** Slice 1 provides durable submission, caller idempotency,
-> registered destination authorization, status lookup, and admission backpressure.
-> Queue publication, supplier delivery, retry, replay, reconciliation, and
-> production operations remain planned in `docs/exec-plan.md`. This is not yet a
-> production-ready notification service.
+> **Project status:** Slices 1–2 provide durable submission, caller idempotency,
+> registered destination authorization, status lookup, admission backpressure,
+> and confirmed Outbox-to-RabbitMQ dispatch. Supplier delivery, retry, replay,
+> reconciliation, and production operations remain planned in
+> `docs/exec-plan.md`. This is not yet a production-ready notification service.
 
 ## Design at a glance
 
@@ -70,8 +70,7 @@ for local formatting, static analysis, and compatibility probes.
 
 ## Local environment
 
-Start PostgreSQL, RabbitMQ, the fake HTTPS supplier, and the empty application
-skeleton:
+Start PostgreSQL, RabbitMQ, the fake HTTPS supplier, and the application:
 
 ```sh
 make up
@@ -119,9 +118,9 @@ make verify-slice SLICE=0
 make migrate ARGS='-version'
 ```
 
-The migration command exposes the pinned migration tool only; the repository
-does not yet contain a business schema. Implementation sequencing and acceptance
-evidence live in [`docs/exec-plan.md`](docs/exec-plan.md).
+The migration command exposes the repository's pinned migration tool.
+Implementation sequencing and acceptance evidence live in
+[`docs/exec-plan.md`](docs/exec-plan.md).
 
 ## Security notes
 
