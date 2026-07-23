@@ -8,7 +8,7 @@ GO_CONTAINER := docker run --rm \
 	-w /src $(GO_IMAGE)
 GO_RUN := $(GO_CONTAINER) go
 
-.PHONY: preflight format format-check lint test test-race integration integration-isolation-test verify-gate verify-slice verify validate-skills migrate up down source-export-check
+.PHONY: preflight format format-check lint test test-race integration capacity integration-isolation-test verify-gate verify-slice verify validate-skills migrate up down source-export-check
 
 preflight:
 	./scripts/preflight.sh
@@ -35,6 +35,9 @@ test-race:
 integration: preflight
 	./scripts/compose-test.sh integration
 
+capacity: preflight
+	./scripts/compose-test.sh capacity
+
 integration-isolation-test: preflight
 	./scripts/compose-isolation-fixture.sh
 
@@ -53,6 +56,7 @@ verify-slice:
 		6) $(GO_RUN) test ./internal/outbound ./internal/worker ./cmd/notifier && \
 			$(GO_RUN) test -tags testnetwork ./cmd/notifier && $(MAKE) integration ;; \
 		7) $(GO_RUN) test ./internal/delivery ./cmd/notifier && $(MAKE) integration ;; \
+		8) $(MAKE) capacity && $(MAKE) source-export-check ;; \
 		*) echo "slice $(SLICE) is not implemented" >&2; exit 2 ;; \
 	esac
 

@@ -156,7 +156,9 @@ durability guarantee.
 
 - The production secret manager, egress-control product, high-availability
   topology, backup policy, and recovery objectives.
-- The capacity model used to evaluate a latency SLO.
+- The production capacity model and approval of a first-attempt latency SLO. The
+  local Slice 8 profile is measured in `docs/capacity-report.md` and supports the
+  proposed target only under its declared conditions.
 
 The proposed first-attempt target of `p99 <= 60 seconds` is not yet an unconditional
 guarantee. It can apply only while dependencies are healthy, admission backpressure

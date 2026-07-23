@@ -272,3 +272,9 @@ incompatible with an unconditional `p99 <= 60 seconds` claim.
 The MVP rejects onboarding a destination without a stable supplier idempotency
 mechanism. Production secret management, production egress enforcement, HA,
 backup, and RTO/RPO design remain outside the local MVP.
+
+The reproducible local Slice 8 profile offers 100 submissions/second to a
+250 requests/second, 8-concurrent destination with healthy dependencies and no
+existing backlog. The latest measurement is recorded in
+`docs/capacity-report.md`. It is evidence that the proposed 60-second p99 is
+supportable in that profile, not an unconditional or approved SLO.

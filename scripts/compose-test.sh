@@ -3,9 +3,9 @@ set -eu
 
 mode=${1:-}
 case "$mode" in
-	gate|integration) ;;
+	gate|integration|capacity) ;;
 	*)
-		echo "usage: $0 gate|integration" >&2
+		echo "usage: $0 gate|integration|capacity" >&2
 		exit 2
 		;;
 esac
@@ -22,6 +22,8 @@ export RABBITMQ_MANAGEMENT_PORT=0
 export APP_PORT=0
 if [ "$mode" = "integration" ]; then
 	export WORKER_ENABLED=false
+elif [ "$mode" = "capacity" ]; then
+	export WORKER_ENABLED=true
 fi
 
 compose() {
@@ -42,6 +44,22 @@ curl --fail --silent --show-error "http://127.0.0.1:$app_port/healthz" >/dev/nul
 app_container=$(compose ps -q app)
 test "$(docker inspect --format '{{.State.Health.Status}}' "$app_container")" = "healthy"
 echo "PASS final app image starts and reports healthy"
+
+if [ "$mode" = "capacity" ]; then
+	postgres_endpoint=$(compose port postgres 5432)
+	postgres_port=${postgres_endpoint##*:}
+	rabbit_endpoint=$(compose port rabbitmq 5672)
+	rabbit_port=${rabbit_endpoint##*:}
+	APP_HEALTH_URL="http://127.0.0.1:$app_port/healthz" \
+		COMPOSE_PROJECT_NAME="$project" \
+		DATABASE_URL="postgres://notifier:notifier-test-only@127.0.0.1:$postgres_port/notifier?sslmode=disable" \
+		RABBITMQ_URL="amqp://notifier:notifier-test-only@127.0.0.1:$rabbit_port/" \
+		REPO_ROOT="$repo_root" \
+		go test -v -timeout 5m -tags='integration capacity' \
+			./test/integration -run '^TestSlice8CapacityAndRestartRecovery$'
+	echo "PASS isolated capacity and restart recovery acceptance"
+	exit 0
+fi
 
 if [ "$mode" = "integration" ]; then
 	postgres_endpoint=$(compose port postgres 5432)

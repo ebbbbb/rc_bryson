@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"reliable-notifier/internal/delivery"
 )
@@ -26,27 +28,48 @@ func newMetricsHandler(snapshot snapshotReader, queueDepth queueDepthReader) htt
 			http.Error(response, "metrics unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		response.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(
-			response,
-			"notifier_oldest_pending_seconds %g\n"+
-				"notifier_oldest_outbox_seconds %g\n"+
-				"notifier_expired_leases %d\n"+
-				"notifier_queue_depth %d\n"+
-				"notifier_permanent_failures %d\n",
+		registry := prometheus.NewRegistry()
+		registerGauge := func(name, help string, value float64) {
+			gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: name, Help: help})
+			gauge.Set(value)
+			registry.MustRegister(gauge)
+		}
+		registerGauge(
+			"notifier_oldest_pending_seconds",
+			"Seconds the oldest currently due pending delivery has waited.",
 			values.OldestPendingSeconds,
+		)
+		registerGauge(
+			"notifier_oldest_outbox_seconds",
+			"Seconds the oldest currently publishable Outbox event has waited.",
 			values.OldestOutboxSeconds,
-			values.ExpiredLeases,
-			depth,
-			values.PermanentFailures,
+		)
+		registerGauge(
+			"notifier_expired_leases",
+			"Number of currently expired Worker leases.",
+			float64(values.ExpiredLeases),
+		)
+		registerGauge(
+			"notifier_queue_depth",
+			"Number of ready dispatch signals reported by RabbitMQ.",
+			float64(depth),
+		)
+		registerGauge(
+			"notifier_permanent_failures",
+			"Number of deliveries currently in permanent failure.",
+			float64(values.PermanentFailures),
+		)
+		results := prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "notifier_delivery_results_total",
+				Help: "Persisted delivery attempt results by fixed result class.",
+			},
+			[]string{"class"},
 		)
 		for _, class := range []string{"succeeded", "retryable_failure", "permanent_failure"} {
-			_, _ = fmt.Fprintf(
-				response,
-				"notifier_delivery_results_total{class=%q} %d\n",
-				class,
-				values.ResultClasses[class],
-			)
+			results.WithLabelValues(class).Set(float64(values.ResultClasses[class]))
 		}
+		registry.MustRegister(results)
+		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(response, request)
 	})
 }

@@ -3,12 +3,12 @@
 An internal service for durably accepting HTTP(S) notifications and delivering
 them asynchronously to pre-registered external suppliers.
 
-The planned service accepts a notification without waiting for the supplier,
+The service accepts a notification without waiting for the supplier,
 persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** Slices 1–7 provide durable submission, caller idempotency,
+> **Project status:** Slices 1–8 provide durable submission, caller idempotency,
 > registered destination authorization, status lookup, admission backpressure,
 > confirmed Outbox-to-RabbitMQ dispatch, and fenced HTTPS success delivery with
 > the minimum SSRF boundary, classified results, bounded retry scheduling, lease
@@ -17,9 +17,10 @@ supplier idempotency values limit the impact of at-least-once retries.
 > validated-IP dialing, TLS hostname verification, forbidden-address rejection,
 > redirect blocking, Header protection, dynamic secret resolution, and log
 > redaction checks. Reconciliation, terminal retention, health/readiness, bounded
-> operational metrics, and backlog alerts are implemented. Capacity and resilience
-> acceptance remain planned in `docs/exec-plan.md`. This is not yet a
-> production-ready notification service.
+> operational metrics, backlog alerts, local capacity measurement, and dependency
+> restart recovery are implemented. Production HA, backups, egress enforcement,
+> and recovery objectives remain unresolved. This is not yet a production-ready
+> notification service.
 
 ## Design at a glance
 
@@ -55,6 +56,10 @@ Detailed project documentation:
 - [`docs/adr/`](docs/adr/) — accepted architectural decisions
 - [`docs/exec-plan.md`](docs/exec-plan.md) — independently verifiable vertical
   slices
+- [`docs/capacity-report.md`](docs/capacity-report.md) — measured local capacity
+  profile and crash-window evidence
+- [`docs/operations.md`](docs/operations.md) — local health, recovery, and replay
+  runbook
 - [`AGENTS.md`](AGENTS.md) — instructions for repository automation agents
 
 ## Prerequisites
@@ -103,6 +108,7 @@ make lint
 make test
 make test-race
 make integration
+make capacity
 ```
 
 Run the complete repository verification with:
@@ -115,6 +121,11 @@ make verify
 Compose validation, repository skill validation, unit tests, race tests,
 toolchain reliability probes, and isolated integration tests. The gate also
 builds and health-checks the final application image.
+
+`make capacity` is the slower, isolated Slice 8 acceptance profile. Its latest
+conditions and measurements are recorded in
+[`docs/capacity-report.md`](docs/capacity-report.md); they are not an unconditional
+production SLO.
 
 Other stable entries include:
 

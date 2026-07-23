@@ -256,3 +256,6 @@ Stop condition: every crash-window test has an observed result matching the fail
 model, no accepted task is silently lost, and the measured capacity report either
 justifies a separately approved SLO or leaves it explicitly unresolved. Evidence
 command: `make verify-slice SLICE=8`.
+
+The latest local evidence profile and crash-window mapping are recorded in
+`docs/capacity-report.md`; operational recovery steps are in `docs/operations.md`.
