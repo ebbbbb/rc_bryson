@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -26,7 +27,7 @@ func NewRabbitConsumer(rawURL string) (*RabbitConsumer, error) {
 		_ = connection.Close()
 		return nil, fmt.Errorf("open RabbitMQ Worker channel: %w", err)
 	}
-	if err := channel.Qos(1, 0, false); err != nil {
+	if err := channel.Qos(8, 0, false); err != nil {
 		_ = channel.Close()
 		_ = connection.Close()
 		return nil, fmt.Errorf("set Worker prefetch: %w", err)
@@ -49,33 +50,62 @@ func NewRabbitConsumer(rawURL string) (*RabbitConsumer, error) {
 }
 
 func (consumer *RabbitConsumer) Run(ctx context.Context, worker *Worker) error {
+	runContext, cancel := context.WithCancel(ctx)
+	var group sync.WaitGroup
+	defer func() {
+		cancel()
+		group.Wait()
+	}()
+	failures := make(chan error, 1)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-failures:
+			return err
 		case message, ok := <-consumer.messages:
 			if !ok {
 				return fmt.Errorf("RabbitMQ Worker delivery channel closed")
 			}
-			var signal dispatch.Signal
-			if err := json.Unmarshal(message.Body, &signal); err != nil {
-				if nackErr := message.Nack(false, false); nackErr != nil {
-					return fmt.Errorf("dead-letter malformed signal: %w", nackErr)
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				if err := consumer.processMessage(runContext, worker, message); err != nil {
+					select {
+					case failures <- err:
+						cancel()
+					default:
+					}
 				}
-				continue
-			}
-			ack, err := worker.Process(ctx, signal)
-			if err != nil || !ack {
-				if nackErr := message.Nack(false, true); nackErr != nil {
-					return fmt.Errorf("requeue failed delivery signal: %w", nackErr)
-				}
-				continue
-			}
-			if err := message.Ack(false); err != nil {
-				return fmt.Errorf("ack committed delivery signal: %w", err)
-			}
+			}()
 		}
 	}
+}
+
+func (consumer *RabbitConsumer) processMessage(
+	ctx context.Context,
+	worker *Worker,
+	message amqp.Delivery,
+) error {
+	var signal dispatch.Signal
+	if err := json.Unmarshal(message.Body, &signal); err != nil {
+		if nackErr := message.Nack(false, false); nackErr != nil {
+			return fmt.Errorf("dead-letter malformed signal: %w", nackErr)
+		}
+		return nil
+	}
+	ack, err := worker.Process(ctx, signal)
+	if err != nil || !ack {
+		if nackErr := message.Nack(false, true); nackErr != nil {
+			return fmt.Errorf("requeue failed delivery signal: %w", nackErr)
+		}
+		return nil
+	}
+	if err := message.Ack(false); err != nil {
+		return fmt.Errorf("ack committed delivery signal: %w", err)
+	}
+	return nil
 }
 
 func (consumer *RabbitConsumer) Close() error {

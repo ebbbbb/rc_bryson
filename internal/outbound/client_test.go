@@ -181,6 +181,9 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("error = %v, want containing %q", err, test.wantError)
 			}
+			if !IsPermanent(err) {
+				t.Fatalf("policy/configuration rejection %v must be permanent", err)
+			}
 			if got := dials.Load(); got != 0 {
 				t.Fatalf("dial attempts = %d, want zero", got)
 			}

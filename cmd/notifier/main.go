@@ -103,6 +103,8 @@ func main() {
 			logger,
 		)
 	}
+	go runRetryScheduler(ctx, store, logger)
+	go runLeaseReconciler(ctx, store, logger)
 
 	errs := make(chan error, 1)
 	go func() {

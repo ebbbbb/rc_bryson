@@ -20,6 +20,8 @@ type fakeStore struct {
 	claimErr    error
 	completeErr error
 	completes   atomic.Int32
+	retries     atomic.Int32
+	permanents  atomic.Int32
 	complete    chan struct{}
 }
 
@@ -41,9 +43,21 @@ func (store *fakeStore) CompleteSuccess(context.Context, delivery.AttemptResult)
 	return store.completeErr
 }
 
+func (store *fakeStore) CompleteRetry(context.Context, delivery.AttemptResult, time.Time) error {
+	store.retries.Add(1)
+	return store.completeErr
+}
+
+func (store *fakeStore) CompletePermanent(context.Context, delivery.AttemptResult) error {
+	store.permanents.Add(1)
+	return store.completeErr
+}
+
 type fakeSender struct {
 	calls   atomic.Int32
 	release <-chan struct{}
+	result  outbound.Result
+	err     error
 }
 
 func (sender *fakeSender) Send(
@@ -55,7 +69,10 @@ func (sender *fakeSender) Send(
 	if sender.release != nil {
 		<-sender.release
 	}
-	return outbound.Result{StatusCode: 204}, nil
+	if sender.result.StatusCode == 0 && sender.err == nil {
+		return outbound.Result{StatusCode: 204}, nil
+	}
+	return sender.result, sender.err
 }
 
 func TestStaleSignalIsAcknowledgedWithoutSending(t *testing.T) {
@@ -131,14 +148,102 @@ func TestDatabaseFailureDoesNotPermitAck(t *testing.T) {
 	}
 }
 
+func TestRetryableAndPermanentResultsArePersistedDistinctly(t *testing.T) {
+	tests := []struct {
+		name           string
+		sender         *fakeSender
+		wantRetries    int32
+		wantPermanents int32
+	}{
+		{
+			name:        "HTTP 429",
+			sender:      &fakeSender{result: outbound.Result{StatusCode: 429}},
+			wantRetries: 1,
+		},
+		{
+			name:        "network failure",
+			sender:      &fakeSender{err: errors.New("connection reset")},
+			wantRetries: 1,
+		},
+		{
+			name:           "HTTP 400",
+			sender:         &fakeSender{result: outbound.Result{StatusCode: 400}},
+			wantPermanents: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := successfulFakeStore()
+			store.destination.RetryStatuses = []int32{408, 425, 429}
+			instance := newTestWorker(t, store, test.sender)
+
+			ack, err := instance.Process(
+				t.Context(),
+				dispatch.Signal{DeliveryID: "delivery-1", Generation: 0},
+			)
+			if err != nil || !ack {
+				t.Fatalf("Process = (%v, %v), want committed result and ACK", ack, err)
+			}
+			if got := store.retries.Load(); got != test.wantRetries {
+				t.Fatalf("retry commits = %d, want %d", got, test.wantRetries)
+			}
+			if got := store.permanents.Load(); got != test.wantPermanents {
+				t.Fatalf("permanent commits = %d, want %d", got, test.wantPermanents)
+			}
+		})
+	}
+}
+
+func TestRetryTimingUsesBoundedRetryAfterAndDeterministicBackoff(t *testing.T) {
+	instance := newTestWorker(t, successfulFakeStore(), &fakeSender{})
+	instance.jitter = func(maximum time.Duration) time.Duration {
+		return maximum / 2
+	}
+	now := time.Date(2026, time.July, 24, 0, 0, 0, 0, time.UTC)
+
+	if got := instance.nextAttemptAt(now, 4, "7200"); !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("bounded Retry-After = %s, want %s", got, now.Add(time.Hour))
+	}
+	if got := instance.nextAttemptAt(now, 4, ""); !got.Equal(now.Add(8 * time.Second)) {
+		t.Fatalf("generation backoff = %s, want %s", got, now.Add(8*time.Second))
+	}
+}
+
+func TestResultClassificationDefaults(t *testing.T) {
+	destination := delivery.DestinationVersion{
+		RetryStatuses: []int32{408, 425, 429},
+	}
+	tests := []struct {
+		name   string
+		status int
+		err    error
+		want   resultClass
+	}{
+		{name: "success", status: 204, want: resultSuccess},
+		{name: "timeout", err: context.DeadlineExceeded, want: resultRetryable},
+		{name: "configured retry", status: 429, want: resultRetryable},
+		{name: "server failure", status: 503, want: resultRetryable},
+		{name: "caller failure", status: 400, want: resultPermanent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classify(test.status, test.err, destination); got != test.want {
+				t.Fatalf("classification = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func successfulFakeStore() *fakeStore {
 	return &fakeStore{
 		task: delivery.Delivery{
-			ID:         "delivery-1",
-			Method:     "POST",
-			Generation: 0,
-			LeaseOwner: "worker-1",
-			LeaseToken: "00000000-0000-4000-8000-000000000001",
+			ID:            "delivery-1",
+			Method:        "POST",
+			Generation:    0,
+			LeaseOwner:    "worker-1",
+			LeaseToken:    "00000000-0000-4000-8000-000000000001",
+			RetryDeadline: time.Now().Add(24 * time.Hour),
 		},
 		destination: delivery.DestinationVersion{},
 	}

@@ -28,6 +28,27 @@ type SecretProvider interface {
 	Resolve(context.Context, string) (string, error)
 }
 
+type permanentError struct {
+	cause error
+}
+
+func (err permanentError) Error() string {
+	return err.cause.Error()
+}
+
+func (err permanentError) Unwrap() error {
+	return err.cause
+}
+
+func IsPermanent(err error) bool {
+	var target permanentError
+	return errors.As(err, &target)
+}
+
+func permanent(err error) error {
+	return permanentError{cause: err}
+}
+
 type EnvironmentSecrets struct{}
 
 func (EnvironmentSecrets) Resolve(_ context.Context, reference string) (string, error) {
@@ -57,6 +78,7 @@ type Sender struct {
 
 type Result struct {
 	StatusCode int
+	RetryAfter string
 }
 
 func NewSender(
@@ -87,19 +109,19 @@ func (sender *Sender) Send(
 ) (Result, error) {
 	target, err := validateURL(destination.URL)
 	if err != nil {
-		return Result{}, err
+		return Result{}, permanent(err)
 	}
 	if !strings.EqualFold(task.Method, http.MethodPost) &&
 		!strings.EqualFold(task.Method, http.MethodPut) &&
 		!strings.EqualFold(task.Method, http.MethodPatch) &&
 		!strings.EqualFold(task.Method, http.MethodDelete) {
-		return Result{}, errors.New("delivery method is not safe for configured outbound use")
+		return Result{}, permanent(errors.New("delivery method is not safe for configured outbound use"))
 	}
 	if !containsFold(destination.AllowedMethods, task.Method) {
-		return Result{}, errors.New("delivery method is not allowed by bound destination version")
+		return Result{}, permanent(errors.New("delivery method is not allowed by bound destination version"))
 	}
 	if err := validateStoredHeaders(task.CallerHeaders, destination); err != nil {
-		return Result{}, err
+		return Result{}, permanent(err)
 	}
 
 	addresses, err := sender.resolver.LookupIP(ctx, "ip", target.Hostname())
@@ -108,11 +130,11 @@ func (sender *Sender) Send(
 	}
 	validatedIP, err := sender.validateAddresses(target.Hostname(), destination.NetworkPolicy, addresses)
 	if err != nil {
-		return Result{}, err
+		return Result{}, permanent(err)
 	}
 	roots, err := sender.roots(destination.NetworkPolicy)
 	if err != nil {
-		return Result{}, err
+		return Result{}, permanent(err)
 	}
 	secret, err := sender.secrets.Resolve(ctx, destination.SecretRef)
 	if err != nil {
@@ -121,7 +143,7 @@ func (sender *Sender) Send(
 
 	request, err := http.NewRequestWithContext(ctx, task.Method, target.String(), bytes.NewReader(task.Body))
 	if err != nil {
-		return Result{}, fmt.Errorf("build outbound request: %w", err)
+		return Result{}, permanent(fmt.Errorf("build outbound request: %w", err))
 	}
 	for name, value := range task.CallerHeaders {
 		request.Header.Set(name, value)
@@ -173,7 +195,10 @@ func (sender *Sender) Send(
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
-	return Result{StatusCode: response.StatusCode}, nil
+	return Result{
+		StatusCode: response.StatusCode,
+		RetryAfter: response.Header.Get("Retry-After"),
+	}, nil
 }
 
 func validateURL(rawURL string) (*url.URL, error) {

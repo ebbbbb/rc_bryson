@@ -63,6 +63,7 @@ func (store *Store) ClaimDelivery(
 			AND generation = $2
 			AND status = 'pending'
 			AND next_attempt_at <= clock_timestamp()
+			AND retry_deadline > clock_timestamp()
 		RETURNING
 			id::text,
 			caller_id,
@@ -119,6 +120,27 @@ func (store *Store) ClaimDelivery(
 }
 
 func (store *Store) CompleteSuccess(ctx context.Context, result AttemptResult) error {
+	return store.completeResult(ctx, result, "succeeded", nil)
+}
+
+func (store *Store) CompleteRetry(
+	ctx context.Context,
+	result AttemptResult,
+	nextAttemptAt time.Time,
+) error {
+	return store.completeResult(ctx, result, "retryable_failure", &nextAttemptAt)
+}
+
+func (store *Store) CompletePermanent(ctx context.Context, result AttemptResult) error {
+	return store.completeResult(ctx, result, "permanent_failure", nil)
+}
+
+func (store *Store) completeResult(
+	ctx context.Context,
+	result AttemptResult,
+	resultClass string,
+	nextAttemptAt *time.Time,
+) error {
 	attemptID, err := newUUID()
 	if err != nil {
 		return err
@@ -134,7 +156,19 @@ func (store *Store) CompleteSuccess(ctx context.Context, result AttemptResult) e
 	tag, err := tx.Exec(ctx, `
 		UPDATE deliveries
 		SET
-			status = 'succeeded',
+			status = CASE
+				WHEN $5 = 'retryable_failure' THEN 'pending'
+				WHEN $5 = 'permanent_failure' THEN 'failed_permanent'
+				ELSE 'succeeded'
+			END,
+			generation = CASE
+				WHEN $5 = 'retryable_failure' THEN generation + 1
+				ELSE generation
+			END,
+			next_attempt_at = CASE
+				WHEN $5 = 'retryable_failure' THEN $6
+				ELSE next_attempt_at
+			END,
 			lease_owner = NULL,
 			lease_token = NULL,
 			lease_until = NULL,
@@ -145,13 +179,16 @@ func (store *Store) CompleteSuccess(ctx context.Context, result AttemptResult) e
 			AND lease_owner = $3
 			AND lease_token = $4
 			AND lease_until > clock_timestamp()
+			AND ($5 <> 'retryable_failure' OR $6 < retry_deadline)
 	`, result.DeliveryID,
 		result.Generation,
 		result.LeaseOwner,
 		result.LeaseToken,
+		resultClass,
+		nextAttemptAt,
 	)
 	if err != nil {
-		return fmt.Errorf("commit fenced success state: %w", err)
+		return fmt.Errorf("commit fenced %s state: %w", resultClass, err)
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrWorkerLeaseLost
@@ -168,20 +205,21 @@ func (store *Store) CompleteSuccess(ctx context.Context, result AttemptResult) e
 			started_at,
 			finished_at
 		)
-		VALUES ($1, $2, $3, $4, 'succeeded', $5, NULLIF($6, ''), $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)
 	`, attemptID,
 		result.DeliveryID,
 		result.Generation,
 		result.LeaseToken,
+		resultClass,
 		result.ResponseStatus,
 		result.ErrorCategory,
 		result.StartedAt,
 		result.FinishedAt,
 	); err != nil {
-		return fmt.Errorf("record success attempt: %w", err)
+		return fmt.Errorf("record %s attempt: %w", resultClass, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit success result: %w", err)
+		return fmt.Errorf("commit %s result: %w", resultClass, err)
 	}
 	return nil
 }
