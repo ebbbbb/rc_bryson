@@ -93,9 +93,9 @@ sequenceDiagram
     participant W as Worker
     participant S as Supplier
 
-    C->>A: POST /deliveries + Idempotency-Key
-    A->>P: BEGIN; INSERT delivery + Outbox; COMMIT
-    P-->>A: committed
+    C->>A: POST /deliveries with Idempotency-Key
+    A->>P: transaction writes delivery and Outbox
+    P-->>A: transaction committed
     A-->>C: 202 Accepted
 
     O->>P: claim unpublished Outbox
@@ -103,11 +103,11 @@ sequenceDiagram
     Q-->>O: publisher confirm
     O->>P: mark published
 
-    Q->>W: delivery_id + generation + trace_id
+    Q->>W: delivery_id, generation, trace_id
     W->>P: check eligibility
     W->>W: reserve destination capacity
     W->>P: atomically claim fenced lease
-    W->>S: validated HTTPS + stable idempotency value
+    W->>S: validated HTTPS with stable idempotency value
     S-->>W: HTTP response
     W->>P: commit attempt and state transition
     W-->>Q: ACK after commit
