@@ -33,6 +33,11 @@ Outbox Publisher, Retry Scheduler, and Reconciler name distinct logical
 responsibilities. They do not imply three microservices or deployment units; the
 MVP may implement them as independent loops in one codebase and process.
 
+When a destination lacks immediate rate/concurrency capacity, the consumer
+publisher-confirms an identifier-only replacement into a durable bounded-delay
+queue before ACKing the original. This queue remains a rebuildable signal layer;
+it does not own task state or retry timing.
+
 The broker dead-letter queue is operational evidence about message transport, not
 the source of truth for permanent business failure. Only PostgreSQL records the
 `failed_permanent` delivery state.

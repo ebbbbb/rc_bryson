@@ -3,16 +3,24 @@
 An internal service for durably accepting HTTP(S) notifications and delivering
 them asynchronously to pre-registered external suppliers.
 
-The planned service accepts a notification without waiting for the supplier,
+The service accepts a notification without waiting for the supplier,
 persists it in PostgreSQL, and dispatches it asynchronously through RabbitMQ.
 Transactional Outbox closes the database/queue dual-write gap, while stable
 supplier idempotency values limit the impact of at-least-once retries.
 
-> **Project status:** the repository currently contains the engineering
-> contracts, application skeleton, and verified development toolchain. Delivery,
-> Outbox, Worker, retry, replay, and business schema implementation will be added
-> through the test-first slices in `docs/exec-plan.md`. This is not yet a
-> production-ready notification service.
+> **Project status:** Slices 1–8 provide durable submission, caller idempotency,
+> registered destination authorization, status lookup, admission backpressure,
+> confirmed Outbox-to-RabbitMQ dispatch, and fenced HTTPS success delivery with
+> the minimum SSRF boundary, classified results, bounded retry scheduling, lease
+> recovery, single-instance destination limits, permanent failure, and audited
+> operator replay. Adversarial outbound-security coverage includes fixed
+> validated-IP dialing, TLS hostname verification, forbidden-address rejection,
+> redirect blocking, Header protection, dynamic secret resolution, and log
+> redaction checks. Reconciliation, terminal retention, health/readiness, bounded
+> operational metrics, backlog alerts, local capacity measurement, and dependency
+> restart recovery are implemented. Production HA, backups, egress enforcement,
+> and recovery objectives remain unresolved. This is not yet a production-ready
+> notification service.
 
 ## Design at a glance
 
@@ -32,7 +40,8 @@ side effects cannot be guaranteed exactly once.
 ```text
 cmd/                 Application and test-probe entry points
 docs/                Product specification, architecture, ADRs, and execution plan
-internal/toolchain/  Toolchain dependency anchors only
+internal/             Delivery implementation and toolchain dependency anchors
+migrations/           Ordered PostgreSQL schema migrations
 test/                Integration-test entry points
 testdata/            Test-only TLS fixtures
 .agents/skills/      Repository development workflows
@@ -47,6 +56,10 @@ Detailed project documentation:
 - [`docs/adr/`](docs/adr/) — accepted architectural decisions
 - [`docs/exec-plan.md`](docs/exec-plan.md) — independently verifiable vertical
   slices
+- [`docs/capacity-report.md`](docs/capacity-report.md) — measured local capacity
+  profile and crash-window evidence
+- [`docs/operations.md`](docs/operations.md) — local health, recovery, and replay
+  runbook
 - [`AGENTS.md`](AGENTS.md) — instructions for repository automation agents
 
 ## Prerequisites
@@ -69,8 +82,7 @@ for local formatting, static analysis, and compatibility probes.
 
 ## Local environment
 
-Start PostgreSQL, RabbitMQ, the fake HTTPS supplier, and the empty application
-skeleton:
+Start PostgreSQL, RabbitMQ, the fake HTTPS supplier, and the application:
 
 ```sh
 make up
@@ -96,6 +108,7 @@ make lint
 make test
 make test-race
 make integration
+make capacity
 ```
 
 Run the complete repository verification with:
@@ -109,6 +122,11 @@ Compose validation, repository skill validation, unit tests, race tests,
 toolchain reliability probes, and isolated integration tests. The gate also
 builds and health-checks the final application image.
 
+`make capacity` is the slower, isolated Slice 8 acceptance profile. Its latest
+conditions and measurements are recorded in
+[`docs/capacity-report.md`](docs/capacity-report.md); they are not an unconditional
+production SLO.
+
 Other stable entries include:
 
 ```sh
@@ -118,9 +136,23 @@ make verify-slice SLICE=0
 make migrate ARGS='-version'
 ```
 
-The migration command exposes the pinned migration tool only; the repository
-does not yet contain a business schema. Implementation sequencing and acceptance
-evidence live in [`docs/exec-plan.md`](docs/exec-plan.md).
+The migration command exposes the repository's pinned migration tool.
+Implementation sequencing and acceptance evidence live in
+[`docs/exec-plan.md`](docs/exec-plan.md).
+
+## Operational endpoints
+
+- `GET /healthz` reports process liveness.
+- `GET /readyz` reports PostgreSQL readiness. RabbitMQ outages do not make the API
+  unready because accepted tasks remain durable in PostgreSQL and Outbox.
+- `GET /metrics` exposes accepted/rejected submission counts, oldest pending and
+  Outbox ages, expired leases, RabbitMQ availability/queue depth, permanent
+  failures, and fixed delivery-result classes in Prometheus text format.
+
+The application emits bounded structured warnings when pending or Outbox age
+reaches 60 seconds or expired Worker leases are observed. These warnings indicate
+operator investigation points; they are not an unconditional delivery-latency
+SLO.
 
 ## Security notes
 

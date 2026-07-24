@@ -8,7 +8,7 @@ GO_CONTAINER := docker run --rm \
 	-w /src $(GO_IMAGE)
 GO_RUN := $(GO_CONTAINER) go
 
-.PHONY: preflight format format-check lint test test-race integration integration-isolation-test verify-gate verify-slice verify validate-skills migrate up down source-export-check
+.PHONY: preflight format format-check lint test test-race integration capacity integration-isolation-test verify-gate verify-slice verify validate-skills migrate up down source-export-check
 
 preflight:
 	./scripts/preflight.sh
@@ -35,6 +35,9 @@ test-race:
 integration: preflight
 	./scripts/compose-test.sh integration
 
+capacity: preflight
+	./scripts/compose-test.sh capacity
+
 integration-isolation-test: preflight
 	./scripts/compose-isolation-fixture.sh
 
@@ -43,8 +46,19 @@ verify-gate: preflight
 
 verify-slice:
 	@test -n "$(SLICE)" || (echo "SLICE is required" >&2; exit 2)
-	@test "$(SLICE)" = "0" || (echo "slice $(SLICE) is not implemented in stage 2.6" >&2; exit 2)
-	$(MAKE) verify-gate
+	@case "$(SLICE)" in \
+		0) $(MAKE) verify-gate ;; \
+		1) $(GO_RUN) test ./internal/delivery && $(MAKE) integration ;; \
+		2) $(GO_RUN) test ./internal/delivery ./internal/dispatch && $(MAKE) integration ;; \
+		3) $(GO_RUN) test ./internal/delivery ./internal/outbound ./internal/worker && $(MAKE) integration ;; \
+		4) $(GO_RUN) test ./internal/delivery ./internal/outbound ./internal/worker && $(MAKE) integration ;; \
+		5) $(GO_RUN) test ./internal/delivery && $(MAKE) integration ;; \
+		6) $(GO_RUN) test ./internal/outbound ./internal/worker ./cmd/notifier && \
+			$(GO_RUN) test -tags testnetwork ./cmd/notifier && $(MAKE) integration ;; \
+		7) $(GO_RUN) test ./internal/delivery ./cmd/notifier && $(MAKE) integration ;; \
+		8) $(MAKE) capacity && $(MAKE) source-export-check ;; \
+		*) echo "slice $(SLICE) is not implemented" >&2; exit 2 ;; \
+	esac
 
 validate-skills:
 	docker build --quiet -f .agents/tools/Dockerfile -t $(SKILL_VALIDATOR_IMAGE) .

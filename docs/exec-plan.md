@@ -76,6 +76,10 @@ Independent verification:
   ID/version, uppercase method, canonical sorted caller headers, and raw body
   bytes, while excluding all three idempotency/credential fields.
 - Unauthorized destinations and payloads over 256 KiB are rejected.
+- The configurable global active backlog defaults to 100,000 `pending` plus
+  `delivering` rows. At capacity a new submission returns `503`,
+  `backlog_capacity_exceeded`, and `Retry-After: 60`, while an idempotent retry
+  still resolves the original delivery.
 
 Stop condition: the acceptance cases pass against a real PostgreSQL instance,
 including forced commit failure and concurrent idempotency races. Evidence command:
@@ -152,12 +156,16 @@ Independent verification:
 - Every success, retryable, and permanent result with a stale generation, owner, or
   lease token affects zero rows and cannot overwrite reclaimed work.
 - An ambiguous attempt may resend with the same supplier idempotency value.
-- A throttled or slow destination does not consume another destination's capacity.
+- A Worker waiting for destination capacity holds no delivery lease. After capacity
+  is granted, its atomic claim rechecks generation, pending state, due time, and
+  retry deadline before any HTTP connection.
+- Eight or more signals for a throttled destination release broker credit through
+  confirmed durable deferral, so a following healthy destination can proceed.
 
 Stop condition: deterministic clock-driven tests prove retry timing and expiry,
 ACK-loss cannot bypass `next_attempt_at`, every stale Worker result is fenced out,
-and a killed Worker is reclaimed without an early concurrent lease. Evidence
-command: `make verify-slice SLICE=4`.
+limiter wait time does not consume lease lifetime, and a killed Worker is reclaimed
+without an early concurrent lease. Evidence command: `make verify-slice SLICE=4`.
 
 ## Slice 5 — Permanent failure and audited replay
 
@@ -215,15 +223,19 @@ backlog alerts.
 
 Independent verification:
 
-- Removing a queued signal does not strand the task; reconciliation recreates it.
+- Removing a queued signal does not strand the task; the running
+  Reconciler/Publisher/Worker path recreates and completes it at the same
+  generation.
 - Reconciliation is idempotent under concurrent instances.
 - Ordinary due retries are emitted only by the Retry Scheduler. Expired-lease
   repair advances generation once; missing-signal repair republishes the current
   generation without advancing it.
 - Pending tasks are never removed; successful and permanently failed tasks follow
   7-day and 30-day retention.
-- Metrics expose oldest pending age, Outbox age, expired leases, queue depth, result
-  classes, and permanent failures without high-cardinality secrets or payloads.
+- Metrics expose submission outcomes, oldest pending age, Outbox age, expired
+  leases, queue availability/depth, result classes, and permanent failures without
+  high-cardinality secrets or payloads. Database-authoritative metrics remain
+  available when RabbitMQ is down.
 
 Stop condition: deleting a signal and expiring a lease are both repaired exactly
 as documented under two concurrent reconcilers, while an ordinary future retry is
@@ -252,3 +264,6 @@ Stop condition: every crash-window test has an observed result matching the fail
 model, no accepted task is silently lost, and the measured capacity report either
 justifies a separately approved SLO or leaves it explicitly unresolved. Evidence
 command: `make verify-slice SLICE=8`.
+
+The latest local evidence profile and crash-window mapping are recorded in
+`docs/capacity-report.md`; operational recovery steps are in `docs/operations.md`.

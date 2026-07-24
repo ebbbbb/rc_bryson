@@ -54,6 +54,10 @@ manual replay.
 - **A task must not be marked successful before a qualifying supplier response is
   observed and the success transition is committed.**
 - No ordering is promised between deliveries.
+- If destination capacity is unavailable, the identifier-only dispatch signal is
+  durably deferred before the consumed signal is acknowledged; no delivery lease
+  is held while waiting and one throttled destination must not exhaust all broker
+  credit.
 - Delivery is at least once. **The same task may be sent more than once**, notably
   when the supplier may have processed a request but the local success transaction
   did not commit.
@@ -78,7 +82,11 @@ manual replay.
 
 ### Inspect and replay
 
-- A caller can inspect only its own delivery status and a redacted attempt summary.
+- A caller can inspect only its own delivery status and the 20 most recent attempt
+  summaries, newest first. Each summary is limited to generation, result class,
+  response status, bounded error category, start time, and finish time; it excludes
+  request headers and body, credentials, supplier idempotency value, and lease
+  metadata.
 - An operator may replay a permanently failed delivery with an auditable actor and
   reason. Replay preserves the logical delivery ID, original `accepted_at`,
   destination version, and stable supplier idempotency value; advances generation;
@@ -98,7 +106,8 @@ manual replay.
 - **Logs must not contain sensitive headers**, credentials, or request bodies.
 - **No network connection may be initiated to an unapproved target address.**
 - Operators can observe submission rate, delivery results, oldest pending age,
-  Outbox age, queue depth, expired leases, and permanent failures.
+  Outbox age, queue availability/depth, expired leases, and permanent failures.
+  Queue probe failure does not hide PostgreSQL-authoritative metrics.
 
 ## Reliability contract
 
@@ -127,6 +136,12 @@ durability guarantee.
   original acceptance time or logical identity.
 - Payload size is capped at 256 KiB; successful and permanently failed records use
   7-day and 30-day retention respectively.
+- The global active backlog limit defaults to 100,000 and counts `pending` plus
+  `delivering` deliveries. It is configurable but is not an SLO. At capacity,
+  `POST /deliveries` returns `503`, error code `backlog_capacity_exceeded`, and
+  `Retry-After: 60`; an idempotent retry of an already accepted request still
+  returns the original delivery.
+- The MVP onboards only suppliers with a stable idempotency mechanism.
 - ADR 0004 selects standard-library HTTP/testing, pgx, amqp091-go, golang-migrate,
   and Prometheus client on the approved base stack.
 - ADR 0005 requires test-first red–green–refactor execution for every business
@@ -150,11 +165,9 @@ durability guarantee.
 
 - The production secret manager, egress-control product, high-availability
   topology, backup policy, and recovery objectives.
-- Exact reviewed module/tool versions are pinned during the toolchain gate without
-  reopening ADR 0004's selected packages.
-- Admission backlog threshold and the capacity model used to approve a latency SLO.
-- Whether a supplier without idempotency support may be onboarded under an explicit
-  business risk exception.
+- The production capacity model and approval of a first-attempt latency SLO. The
+  local Slice 8 profile is measured in `docs/capacity-report.md` and supports the
+  proposed target only under its declared conditions.
 
 The proposed first-attempt target of `p99 <= 60 seconds` is not yet an unconditional
 guarantee. It can apply only while dependencies are healthy, admission backpressure

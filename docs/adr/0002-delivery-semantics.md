@@ -23,8 +23,16 @@ Promise durable acceptance and at-least-once delivery, not exactly-once effects.
   idempotency Header, and injected credential.
 - Assign a stable supplier idempotency value to each logical delivery and inject it
   according to the destination configuration.
+- Do not onboard a supplier into the MVP unless its API exposes a stable
+  idempotency mechanism.
 - Mark success only after a configured successful HTTP response and a committed
   success transition.
+- Perform a read-only eligibility and immutable-destination lookup, then attempt to
+  obtain destination rate/concurrency capacity before acquiring a delivery lease.
+  When capacity is unavailable, confirm a durable delayed replacement signal
+  before ACKing the original. The atomic claim must recheck generation, pending
+  state, due time, and retry deadline; a failed claim rolls back its rate
+  reservation.
 - Use finite Worker leases. An expired lease is reclaimable.
 - Fence every Worker result update by delivery ID, generation, `delivering` state,
   lease owner, lease token, and lease validity. A zero-row update means ownership
@@ -47,14 +55,16 @@ replay; and appends an operator, reason, and timestamp to the audit record.
   unchanged.
 - Duplicate queue messages usually do not create duplicate sends because the
   database generation and lease are checked first.
+- Deferring for destination capacity cannot consume lease lifetime or all broker
+  credit. If delivery state changes before the final claim, the claim fails, its
+  rate reservation is rolled back, and no HTTP connection is made.
 - Loss of a Worker ACK after a retryable result cannot trigger an early retry: the
   redelivered message carries the old generation, while the new generation has no
   Outbox signal until `next_attempt_at`.
 - An expired Worker cannot overwrite a newer result because its generation or lease
   fencing values no longer match.
 - A duplicate HTTP send is still possible after an ambiguous attempt.
-- Suppliers without idempotency support cannot receive an exactly-once guarantee
-  and require an explicit risk exception before onboarding.
+- Suppliers without idempotency support are outside the MVP.
 - No event ordering is guaranteed.
 - “Succeeded” means the supplier returned an accepted response, not that its
   downstream business operation completed.

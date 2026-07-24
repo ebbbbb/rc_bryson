@@ -36,6 +36,8 @@ The implementation must expose these stable commands:
 - `make test` — deterministic unit and component tests.
 - `make test-race` — run Go tests with the race detector.
 - `make integration` — run isolated service-health integration tests.
+- `make capacity` — run the isolated 100 submissions/second and restart-recovery
+  acceptance profile.
 - `make verify-slice SLICE=<n>` — run the executable acceptance evidence for one
   implementation slice.
 - `make lint` — check formatting, `go vet`, module checksums, and Compose config.
