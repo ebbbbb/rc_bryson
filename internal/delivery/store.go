@@ -312,6 +312,11 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 		config.Destination.DestinationID == "" || config.Destination.Version <= 0 {
 		return errors.New("bootstrap configuration is incomplete")
 	}
+	for _, method := range config.Destination.AllowedMethods {
+		if !IsSupportedOutboundMethod(method) {
+			return fmt.Errorf("bootstrap destination contains unsupported method %q", method)
+		}
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin bootstrap: %w", err)

@@ -44,6 +44,8 @@ manual replay.
 ### Deliver
 
 - The service sends only to a pre-registered HTTPS destination.
+- Destination configuration may allow only `POST`, `PUT`, `PATCH`, and `DELETE`;
+  unsupported methods are rejected before the immutable version is stored.
 - URL, network policy, allowed methods and headers, response rules, timeout, and
   secret reference come from the delivery's immutable `destination_version`.
   Secret values are resolved dynamically at attempt time.

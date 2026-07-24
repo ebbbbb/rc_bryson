@@ -29,6 +29,8 @@ backpressure.
 - Rising `notifier_permanent_failures`: inspect the bounded attempt category and
   destination configuration. RabbitMQ DLQ entries are not business terminal state.
 
+Destination rate and concurrency are process-local and keyed by Destination ID. A stricter immutable version takes effect when the Worker observes it; relaxing either value requires restarting the Worker so the limiter can be rebuilt from current configuration.
+
 ## Safe local restart
 
 `docker compose restart app`, `rabbitmq`, or `postgres` preserves the named local

@@ -59,6 +59,8 @@ Supplier 可能已经处理请求，但 Worker 在提交本地成功状态前崩
 
 系统明确不承诺 Exactly-once、跨任务顺序、Supplier 后续业务结果，也不负责上游业务事务与通知提交之间的原子性。
 
+上述能力分为四层：PostgreSQL、Outbox、Worker、重试和幂等构成可靠投递内核；lease、generation、fencing 和 Reconciler 处理故障正确性；Fake Supplier、Docker Compose、集成及容量测试用于本地验证；`AGENTS.md`、项目级 Skill 和 Hook 用于 AI Agent 工程控制，不进入通知服务运行时。Replay、Retention 和 Metrics 补齐本地运维闭环，可根据正式生产范围分阶段上线。
+
 ## 快速开始
 
 ### 环境要求
@@ -303,10 +305,10 @@ make verify-slice SLICE=4
 | 返回 `202` | 200 / 200 |
 | PostgreSQL 中可查询 | 200 / 200 |
 | 最终成功 | 200 / 200 |
-| First-attempt p99 | 1.176 s |
-| First-attempt maximum | 1.669 s |
+| First-attempt p99 | 2.112 s |
+| First-attempt maximum | 2.210 s |
 
-这只证明该本地 Profile 支持拟议的 `p99 <= 60s`，不是无条件 Production SLO。完整条件和 Crash-window 证据见 [`docs/capacity-report.md`](docs/capacity-report.md)。
+这组数据来自 2026-07-24 对 Commit `41a1a36` 的干净工作区验证，只证明该本地 Profile 支持拟议的 `p99 <= 60s`，不是无条件 Production SLO。完整命令、环境、条件和 Crash-window 证据见 [`docs/capacity-report.md`](docs/capacity-report.md)。
 
 ## AI Agent 协作与工程控制
 

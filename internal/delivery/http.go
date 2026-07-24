@@ -142,7 +142,8 @@ func (api *API) submit(response http.ResponseWriter, request *http.Request) {
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.Method))
-	if !containsFold(destination.AllowedMethods, method) {
+	if !IsSupportedOutboundMethod(method) ||
+		!containsFold(destination.AllowedMethods, method) {
 		writeError(response, http.StatusBadRequest, "method_not_allowed", "method is not allowed for destination")
 		return
 	}

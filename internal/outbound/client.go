@@ -132,10 +132,7 @@ func (sender *Sender) Send(
 	if err != nil {
 		return Result{}, permanent(err)
 	}
-	if !strings.EqualFold(task.Method, http.MethodPost) &&
-		!strings.EqualFold(task.Method, http.MethodPut) &&
-		!strings.EqualFold(task.Method, http.MethodPatch) &&
-		!strings.EqualFold(task.Method, http.MethodDelete) {
+	if !delivery.IsSupportedOutboundMethod(task.Method) {
 		return Result{}, permanent(errors.New("delivery method is not safe for configured outbound use"))
 	}
 	if !containsFold(destination.AllowedMethods, task.Method) {

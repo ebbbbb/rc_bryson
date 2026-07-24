@@ -102,6 +102,11 @@ resolves that version's credential reference at each send, so rotation changes t
 secret value without mutating the version. Secrets never enter task rows or queue
 messages.
 
+The configuration boundary accepts only `POST`, `PUT`, `PATCH`, and `DELETE` in
+`allowed_methods`. The API and outbound sender use the same supported-method
+policy, so a method accepted with `202` cannot later fail only because the Worker
+uses a narrower global method set.
+
 The local Bootstrap path is idempotent only when an existing caller key and
 destination version exactly match the requested configuration. Reusing either
 identity with different immutable content fails the transaction instead of
@@ -298,6 +303,8 @@ destination-global rate and concurrency limits. Horizontal Worker scaling is
 forbidden until a new ADR selects and validates a shared coordination mechanism;
 Redis is not implicitly selected. PostgreSQL and RabbitMQ remain separate durable
 dependencies.
+
+The process-local limiter is keyed by Destination ID. While immutable versions coexist, it retains the strictest rate and concurrency values observed for that Destination in the current process. Tightening either value takes effect when the version is observed; relaxing a value requires restarting the Worker.
 
 First-attempt latency is capacity-dependent and remains a proposed SLO. It may be
 measured only while PostgreSQL, the queue, and Workers are healthy; admission

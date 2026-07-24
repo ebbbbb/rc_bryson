@@ -12,6 +12,20 @@ make capacity
 The test creates an isolated Docker Compose project with disposable PostgreSQL and
 RabbitMQ volumes and Docker-assigned host ports.
 
+## Verification run
+
+- Date: 2026-07-24
+- Commit: `41a1a36024fa082d9924a5daa6111f5561f31680`
+- Source state: clean worktree
+- Environment: macOS, Docker Desktop using Linux containers, Go 1.26.2
+
+| Command | Result |
+|---|---|
+| `make verify` | Passed preflight, lint, project-level Skill validation, unit and component tests, Hook fixtures, race tests, Docker gate probes, and isolated integration tests |
+| `make capacity` | Passed 200 submissions, persistence, completion, and deterministic application restart recovery |
+| `make integration-isolation-test` | Passed concurrent isolated Compose projects without changing the development environment |
+| `make source-export-check` | Passed non-integration checks, race tests, Skill and Hook validation, and Compose validation from a source-only export |
+
 ## Measured profile
 
 - Date: 2026-07-24
@@ -33,8 +47,8 @@ Observed result:
 | Accepted with `202` | 200 |
 | Persisted in PostgreSQL | 200 |
 | Eventually succeeded | 200 |
-| First-attempt p99 | 1.176 seconds |
-| First-attempt maximum | 1.669 seconds |
+| First-attempt p99 | 2.112 seconds |
+| First-attempt maximum | 2.210 seconds |
 
 No accepted task was silently lost. The proposed first-attempt `p99 <= 60 seconds`
 is supportable in this declared local profile. It remains unapproved as a general

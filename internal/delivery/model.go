@@ -2,6 +2,8 @@ package delivery
 
 import (
 	"errors"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -90,4 +92,11 @@ type BootstrapConfig struct {
 	CallerID     string
 	CallerAPIKey string
 	Destination  DestinationVersion
+}
+
+func IsSupportedOutboundMethod(method string) bool {
+	return strings.EqualFold(method, http.MethodPost) ||
+		strings.EqualFold(method, http.MethodPut) ||
+		strings.EqualFold(method, http.MethodPatch) ||
+		strings.EqualFold(method, http.MethodDelete)
 }
