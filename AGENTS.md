@@ -24,6 +24,11 @@ document in the same change when an accepted contract changes.
 - Never connect to an unregistered or network-policy-forbidden destination.
 - Establish the complete minimum SSRF boundary before the first outbound HTTP connection.
 - Write each slice's failing behavior test before its implementation.
+- Validate at trust and construction boundaries; do not add speculative internal
+  fallbacks, abstractions without semantic ownership, or compatibility behavior
+  without an approved version or historical-data contract.
+- After production Go changes, use `$review-maintainability` before completion;
+  Hooks track completion evidence but do not perform semantic review.
 - Do not claim exactly-once delivery or business-side-effect completion.
 
 ## Required project commands
@@ -42,6 +47,8 @@ The implementation must expose these stable commands:
   implementation slice.
 - `make lint` — check formatting, `go vet`, module checksums, and Compose config.
 - `make validate-skills` — validate all repository skills reproducibly.
+- `make record-maintainability-review` — record that the current production diff
+  received semantic maintainability review; this is not a substitute for review.
 - `make migrate ARGS='<arguments>'` — run the pinned migration CLI; migrations
   remain operator actions and no business schema is implicit.
 - `make up` / `make down` — start and stop the local Docker environment.

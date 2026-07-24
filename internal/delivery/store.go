@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,14 +29,6 @@ func NewStore(pool *pgxpool.Pool, backlogLimit int64) (*Store, error) {
 		return nil, errors.New("backlog limit must be positive")
 	}
 	return &Store{pool: pool, backlogLimit: backlogLimit}, nil
-}
-
-func (store *Store) Authenticate(ctx context.Context, apiKey string) (string, error) {
-	principal, err := store.AuthenticatePrincipal(ctx, apiKey)
-	if err != nil {
-		return "", err
-	}
-	return principal.CallerID, nil
 }
 
 func (store *Store) AuthenticatePrincipal(ctx context.Context, apiKey string) (Principal, error) {
@@ -335,6 +328,17 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 	`, config.CallerID, apiKeyHash[:]); err != nil {
 		return fmt.Errorf("bootstrap caller: %w", err)
 	}
+	var callerMatches bool
+	if err := tx.QueryRow(ctx, `
+		SELECT api_key_hash = $2
+		FROM callers
+		WHERE id = $1
+	`, config.CallerID, apiKeyHash[:]).Scan(&callerMatches); err != nil {
+		return fmt.Errorf("verify bootstrap caller: %w", err)
+	}
+	if !callerMatches {
+		return errors.New("bootstrap caller conflicts with existing configuration")
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO destinations (id, current_version)
 		VALUES ($1, $2)
@@ -383,6 +387,18 @@ func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error
 		config.Destination.MaxConcurrency,
 	); err != nil {
 		return fmt.Errorf("bootstrap destination version: %w", err)
+	}
+	existingDestination, err := queryDestinationVersion(
+		ctx,
+		tx,
+		config.Destination.DestinationID,
+		config.Destination.Version,
+	)
+	if err != nil {
+		return fmt.Errorf("verify bootstrap destination version: %w", err)
+	}
+	if !reflect.DeepEqual(existingDestination, config.Destination) {
+		return errors.New("bootstrap destination version conflicts with existing configuration")
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO caller_destinations (caller_id, destination_id)

@@ -90,10 +90,7 @@ func newMetricsHandler(
 			},
 			[]string{"outcome"},
 		)
-		counts := map[string]uint64{}
-		if submissionCounts != nil {
-			counts = submissionCounts()
-		}
+		counts := submissionCounts()
 		for _, outcome := range []string{"accepted", "rejected"} {
 			submissions.WithLabelValues(outcome).Add(float64(counts[outcome]))
 		}

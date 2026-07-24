@@ -87,6 +87,7 @@ echo "PASS hook bootstrap resolves the repository from input, not initial cwd"
 
 configured_track=$(jq -r '.hooks.PostToolUse[0].hooks[1].command' "$project_root/.codex/hooks.json")
 configured_record=$(jq -r '.hooks.PostToolUse[1].hooks[0].command' "$project_root/.codex/hooks.json")
+configured_review=$(jq -r '.hooks.PostToolUse[1].hooks[1].command' "$project_root/.codex/hooks.json")
 configured_stop=$(jq -r '.hooks.Stop[0].hooks[0].command' "$project_root/.codex/hooks.json")
 printf '\n// bootstrap tracking\n' >>"$fixture_root/pkg/value.go"
 (
@@ -100,6 +101,14 @@ test "$(
 (
 	cd /
 	bash_input bootstrap-all "make verify" 0 | /bin/sh -c "$configured_record"
+)
+test "$(
+	cd /
+	stop_input bootstrap-all | /bin/sh -c "$configured_stop" | jq -r '.decision? // "allow"'
+)" = "block"
+(
+	cd /
+	bash_input bootstrap-all "make record-maintainability-review" 0 | /bin/sh -c "$configured_review"
 )
 test "$(
 	cd /
@@ -138,9 +147,11 @@ test ! -s "$fixture_root/session-b.out"
 echo "PASS tracking is lock-safe and isolated by repository plus session"
 
 bash_input session-a "make verify" 0 | bash "$verify_hook" record-verification
+test "$(stop_input session-a | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "block"
+bash_input session-a "make record-maintainability-review" 0 | bash "$verify_hook" record-review
 test "$(stop_input session-a | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "allow"
 test "$(stop_input session-b | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "block"
-echo "PASS successful verification resets only its own session"
+echo "PASS verification and review evidence reset only their own session"
 
 patch_input reset-fixture pkg/file1.go | bash "$verify_hook" track >/dev/null
 bash_input reset-fixture "make lint" 0 | bash "$verify_hook" record-verification
@@ -150,10 +161,24 @@ test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')
 bash_input reset-fixture "make verify" missing | bash "$verify_hook" record-verification
 test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')" = "block"
 bash_input reset-fixture "make verify" 0 | bash "$verify_hook" record-verification
+test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')" = "block"
+bash_input reset-fixture "make record-maintainability-review" 1 | bash "$verify_hook" record-review
+test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')" = "block"
+bash_input reset-fixture "make record-maintainability-review" missing | bash "$verify_hook" record-review
+test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')" = "block"
+bash_input reset-fixture "make record-maintainability-review" 0 | bash "$verify_hook" record-review
 test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "allow"
 patch_input reset-fixture pkg/file1.go | bash "$verify_hook" track >/dev/null
 test "$(stop_input reset-fixture | bash "$verify_hook" stop | jq -r '.decision')" = "block"
-echo "PASS only successful make verify resets state, and later edits invalidate it"
+echo "PASS partial and failed checks do not clear state, and later edits invalidate both receipts"
+
+patch_input review-first pkg/file2.go | bash "$verify_hook" track >/dev/null
+bash_input review-first "make record-maintainability-review" 0 | bash "$verify_hook" record-review
+review_first_reason=$(stop_input review-first | bash "$verify_hook" stop | jq -r '.reason')
+grep -q "make verify" <<<"$review_first_reason"
+bash_input review-first "make verify" 0 | bash "$verify_hook" record-verification
+test "$(stop_input review-first | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "allow"
+echo "PASS review completion does not impersonate executable verification"
 
 patch_input recursive-stop pkg/file2.go | bash "$verify_hook" track >/dev/null
 test "$(stop_input recursive-stop true | bash "$verify_hook" stop | jq -r '.decision? // "allow"')" = "allow"
@@ -162,9 +187,15 @@ echo "PASS recursive Stop invocation is allowed"
 jq -e '
 	.hooks.PostToolUse | length == 2
 	and ([.[] | select(.matcher == "apply_patch|Edit|Write")] | length == 1)
+	and (.[] | select(.matcher == "Bash") | .hooks | length == 2)
 ' "$project_root/.codex/hooks.json" >/dev/null
 echo "PASS hooks.json fixture matches the project hook schema shape"
 
 grep -q 'Run `make verify` as the single completion path' "$project_root/.agents/skills/verify/SKILL.md"
 test "$(grep -c 'make verify' "$project_root/.agents/skills/verify/SKILL.md")" -ge 1
 echo "PASS verify skill declares the same sole completion path as the hook"
+
+grep -q 'make record-maintainability-review' \
+	"$project_root/.agents/skills/review-maintainability/SKILL.md"
+grep -q 'do not perform semantic review' "$project_root/AGENTS.md"
+echo "PASS maintainability skill and hook document the semantic boundary"

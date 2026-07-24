@@ -1,5 +1,5 @@
 {
-  "description": "Repository-local Go formatting and verification gates.",
+  "description": "Repository-local Go formatting, verification, and maintainability-review gates.",
   "hooks": {
     "PostToolUse": [
       {
@@ -27,6 +27,12 @@
             "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" record-verification",
             "timeout": 8,
             "statusMessage": "Recording successful repository verification"
+          },
+          {
+            "type": "command",
+            "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" record-review",
+            "timeout": 8,
+            "statusMessage": "Recording maintainability review evidence"
           }
         ]
       }
@@ -38,7 +44,7 @@
             "type": "command",
             "command": "input=$(cat); cwd=$(printf '%s' \"$input\" | jq -er '.cwd'); root=$(git -C \"$cwd\" rev-parse --show-toplevel); printf '%s' \"$input\" | bash \"$root/.codex/hooks/verify-gate.sh\" stop",
             "timeout": 8,
-            "statusMessage": "Checking repository verification state"
+            "statusMessage": "Checking repository completion state"
           }
         ]
       }

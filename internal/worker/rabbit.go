@@ -1,9 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -107,8 +110,8 @@ func (consumer *RabbitConsumer) processMessage(
 	worker *Worker,
 	message amqp.Delivery,
 ) error {
-	var signal dispatch.Signal
-	if err := json.Unmarshal(message.Body, &signal); err != nil {
+	signal, err := decodeSignal(message.Body)
+	if err != nil {
 		if nackErr := message.Nack(false, false); nackErr != nil {
 			return fmt.Errorf("dead-letter malformed signal: %w", nackErr)
 		}
@@ -143,6 +146,19 @@ func (consumer *RabbitConsumer) processMessage(
 		return fmt.Errorf("ack committed delivery signal: %w", err)
 	}
 	return nil
+}
+
+func decodeSignal(body []byte) (dispatch.Signal, error) {
+	var signal dispatch.Signal
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&signal); err != nil {
+		return dispatch.Signal{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return dispatch.Signal{}, errors.New("signal must contain exactly one JSON value")
+	}
+	return signal, nil
 }
 
 func (consumer *RabbitConsumer) Close() error {

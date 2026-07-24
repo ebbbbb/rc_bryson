@@ -46,7 +46,7 @@ func runWorker(
 		consumer, connectErr := worker.NewRabbitConsumer(rabbitURL)
 		if connectErr != nil {
 			logger.Warn("Worker broker unavailable", "error", "broker_unavailable")
-			if !waitWorker(ctx, time.Second) {
+			if !waitFor(ctx, time.Second) {
 				return
 			}
 			continue
@@ -57,7 +57,7 @@ func runWorker(
 			return
 		}
 		logger.Warn("Worker consumer interrupted", "error", workerErrorCategory(runErr))
-		if !waitWorker(ctx, time.Second) {
+		if !waitFor(ctx, time.Second) {
 			return
 		}
 	}
@@ -68,17 +68,6 @@ func allowTestNetworkPolicy(environment, bootstrap, allowance string) bool {
 		environment == "test" &&
 		bootstrap == "true" &&
 		allowance == "true"
-}
-
-func waitWorker(ctx context.Context, duration time.Duration) bool {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 func workerErrorCategory(err error) string {

@@ -17,8 +17,10 @@ func TestHealthEndpoints(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			response := httptest.NewRecorder()
+			mux := http.NewServeMux()
+			registerHealthRoutes(mux, func(context.Context) error { return nil })
 
-			newMux(nil, nil, nil).ServeHTTP(response, request)
+			mux.ServeHTTP(response, request)
 
 			if response.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
@@ -29,7 +31,8 @@ func TestHealthEndpoints(t *testing.T) {
 
 func TestReadinessFailsClosedWhileLivenessRemainsHealthy(t *testing.T) {
 	ready := func(context.Context) error { return errors.New("database unavailable") }
-	handler := newMux(nil, ready, nil)
+	mux := http.NewServeMux()
+	registerHealthRoutes(mux, ready)
 	for _, test := range []struct {
 		path string
 		want int
@@ -38,7 +41,7 @@ func TestReadinessFailsClosedWhileLivenessRemainsHealthy(t *testing.T) {
 		{path: "/readyz", want: http.StatusServiceUnavailable},
 	} {
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
 		if response.Code != test.want {
 			t.Fatalf("%s status = %d, want %d", test.path, response.Code, test.want)
 		}

@@ -17,33 +17,19 @@ import (
 	"reliable-notifier/internal/dispatch"
 )
 
-func newMux(
-	api *delivery.API,
-	ready func(context.Context) error,
-	metrics http.Handler,
-) http.Handler {
-	mux := http.NewServeMux()
+func registerHealthRoutes(mux *http.ServeMux, ready func(context.Context) error) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, request *http.Request) {
-		if ready != nil {
-			ctx, cancel := context.WithTimeout(request.Context(), time.Second)
-			defer cancel()
-			if err := ready(ctx); err != nil {
-				http.Error(w, "not ready", http.StatusServiceUnavailable)
-				return
-			}
+		ctx, cancel := context.WithTimeout(request.Context(), time.Second)
+		defer cancel()
+		if err := ready(ctx); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	if api != nil {
-		api.Register(mux)
-	}
-	if metrics != nil {
-		mux.Handle("GET /metrics", metrics)
-	}
-	return mux
 }
 
 func main() {
@@ -91,10 +77,14 @@ func main() {
 		},
 		api.SubmissionCounts,
 	)
+	mux := http.NewServeMux()
+	registerHealthRoutes(mux, pool.Ping)
+	api.Register(mux)
+	mux.Handle("GET /metrics", metrics)
 
 	server := &http.Server{
 		Addr:              envOr("HTTP_ADDR", ":8080"),
-		Handler:           newMux(api, pool.Ping, metrics),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

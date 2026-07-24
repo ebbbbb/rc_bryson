@@ -68,6 +68,32 @@ func TestInvalidSignalIsDeadLetteredWithoutDatabaseAccess(t *testing.T) {
 	}
 }
 
+func TestSignalWithUnknownFieldsIsDeadLetteredWithoutDatabaseAccess(t *testing.T) {
+	store := successfulFakeStore()
+	acknowledger := &fakeAcknowledger{}
+	message := amqp.Delivery{
+		Acknowledger: acknowledger,
+		DeliveryTag:  1,
+		Body: []byte(
+			`{"delivery_id":"00000000-0000-4000-8000-000000000001",` +
+				`"generation":0,"trace_id":"00000000-0000-4000-8000-000000000002",` +
+				`"future_field":"silently-accepted"}`,
+		),
+	}
+	instance := newTestWorker(t, store, &fakeSender{})
+	consumer := &RabbitConsumer{deferrer: &fakeDeferrer{}}
+
+	if err := consumer.processMessage(t.Context(), instance, message); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledger.nacks.Load() != 1 || acknowledger.lastRequeue.Load() {
+		t.Fatal("signal with an unknown field was not dead-lettered exactly once")
+	}
+	if store.claims.Load() != 0 {
+		t.Fatalf("signal with an unknown field acquired %d leases, want zero", store.claims.Load())
+	}
+}
+
 func TestTransientProcessingFailureRequeuesAndInterruptsConsumer(t *testing.T) {
 	store := successfulFakeStore()
 	store.eligibleErr = errors.New("database unavailable")

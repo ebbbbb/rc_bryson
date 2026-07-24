@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Maintainability"
+  short_description: "Review AI-written Go changes for maintainability problems"
+  default_prompt: "Use $review-maintainability to inspect the completed implementation for concrete speculative defenses, thin wrappers, unapproved compatibility, duplication, and human-maintenance hazards."

@@ -8,7 +8,7 @@ GO_CONTAINER := docker run --rm \
 	-w /src $(GO_IMAGE)
 GO_RUN := $(GO_CONTAINER) go
 
-.PHONY: preflight format format-check lint test test-race integration capacity integration-isolation-test verify-gate verify-slice verify validate-skills migrate up down source-export-check
+.PHONY: preflight format format-check lint test test-race integration capacity integration-isolation-test verify-gate verify-slice verify validate-skills record-maintainability-review migrate up down source-export-check
 
 preflight:
 	./scripts/preflight.sh
@@ -62,10 +62,13 @@ verify-slice:
 
 validate-skills:
 	docker build --quiet -f .agents/tools/Dockerfile -t $(SKILL_VALIDATOR_IMAGE) .
-	@for skill in implement-slice verify reliability-review; do \
+	@for skill in implement-slice verify reliability-review review-maintainability; do \
 		docker run --rm -v "$(CURDIR)/.agents/skills:/skills:ro" \
 			$(SKILL_VALIDATOR_IMAGE) "/skills/$$skill"; \
 	done
+
+record-maintainability-review:
+	@printf '%s\n' "Maintainability review receipt accepted by the project hook."
 
 migrate: preflight
 	$(GO_RUN) run -tags postgres -ldflags '-X main.Version=v4.19.1' \

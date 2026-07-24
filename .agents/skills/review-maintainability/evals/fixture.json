@@ -1,0 +1,12 @@
+{
+  "prompt": "The AI-written implementation is complete. Review it for maintainability before declaring the task done.",
+  "expected": [
+    "reads the intended contract and production diff before judging complexity",
+    "reports only concrete maintenance paths rather than style preferences",
+    "distinguishes boundary validation from speculative internal defensive branches",
+    "does not reject a short function solely because of its statement count",
+    "requires an approved version or historical-data contract for compatibility paths",
+    "distinguishes necessary reliability complexity from overengineering",
+    "records review evidence only after findings and authorized fixes are settled"
+  ]
+}

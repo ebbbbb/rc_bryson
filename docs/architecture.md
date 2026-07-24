@@ -42,6 +42,10 @@ when a destination has no immediately available rate/concurrency capacity. The
 consumer publishes the replacement with confirmation before ACKing the original,
 so capacity waiting releases broker credit without dropping the signal.
 
+The signal schema is exact for the MVP. Malformed messages, trailing JSON values,
+and unknown fields are rejected to the DLQ; accepting a future signal shape
+requires an explicit compatibility decision rather than permissive decoding.
+
 The queue's dead-letter queue diagnoses message-transport or consumer failures. It
 is not the record of business delivery failure. A delivery becomes permanently
 failed only through a committed PostgreSQL state transition.
@@ -97,6 +101,11 @@ acceptance-time `destination_version`; replay retains it. The secret provider
 resolves that version's credential reference at each send, so rotation changes the
 secret value without mutating the version. Secrets never enter task rows or queue
 messages.
+
+The local Bootstrap path is idempotent only when an existing caller key and
+destination version exactly match the requested configuration. Reusing either
+identity with different immutable content fails the transaction instead of
+silently preserving historical data.
 
 ### Observability and maintenance
 
