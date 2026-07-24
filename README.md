@@ -44,6 +44,89 @@ Supplier 可能已经处理请求，但 Worker 在提交本地成功状态前崩
 
 不同 Destination 的超时、限流和故障相互独立。Worker 在取得 Destination capacity 前不持有 delivery lease；容量不足时，将同一 identifier-only signal 写入 durable delay queue 后释放 RabbitMQ consumer credit，避免一个慢目标占满全部 Worker。
 
+## MVP 已实现能力
+
+- Caller API Key 鉴权与 Destination 级授权。
+- 256 KiB Header/Body 限制和 Caller-scoped idempotency。
+- 不可变 Destination version；已接受任务始终绑定接收时版本。
+- Transactional Outbox、durable identifier-only signal 和 publisher confirm。
+- At-least-once HTTPS delivery、稳定 Supplier idempotency value。
+- 有限 Worker lease、完整 fencing、超时、状态码分类和 24 小时重试窗口。
+- Destination 级 rate/concurrency limiter 和 durable delay queue。
+- 永久失败、最近 20 次脱敏 attempt summary 和授权人工 Replay。
+- 任务/Signal 恢复、终态留存、backpressure、Metrics、Liveness 和 Readiness。
+- 注册目标、禁重定向、Header 保护、DNS/IP 检查、validated-IP dialing、TLS hostname verification、动态 Secret 解析和日志脱敏。
+
+系统明确不承诺 Exactly-once、跨任务顺序、Supplier 后续业务结果，也不负责上游业务事务与通知提交之间的原子性。
+
+## 快速开始
+
+### 环境要求
+
+- Go 1.26.x
+- Docker 和 Docker Compose
+- Make、POSIX Shell、Bash、`jq`、`curl`
+
+```sh
+make preflight
+make up
+```
+
+默认本地环境会启动：
+
+- API：`http://localhost:18080`
+- PostgreSQL：`localhost:15432`
+- RabbitMQ AMQP：`localhost:15672`
+- RabbitMQ Management：`http://localhost:25672`
+- Test-only fake HTTPS Supplier
+
+检查服务：
+
+```sh
+curl --fail http://localhost:18080/healthz
+curl --fail http://localhost:18080/readyz
+curl --fail http://localhost:18080/metrics
+```
+
+本地 Compose 只用于开发测试，内置凭据均为 test-only。
+
+### 提交通知
+
+```sh
+curl --fail-with-body \
+  -H 'Authorization: Bearer caller-a-test-key' \
+  -H 'Idempotency-Key: registration-10001' \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "destination_id": "supplier-a",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-Event-Type": "user.registered"
+    },
+    "body_base64": "eyJ1c2VyX2lkIjoiMTAwMDEifQ=="
+  }' \
+  http://localhost:18080/deliveries
+```
+
+`body_base64` 在这个示例中表示 `{"user_id":"10001"}`。成功响应是任务已经在 PostgreSQL 中持久化后的 `202 Accepted`，不会等待 fake Supplier。
+
+### 查询状态
+
+```sh
+curl --fail-with-body \
+  -H 'Authorization: Bearer caller-a-test-key' \
+  http://localhost:18080/deliveries/<delivery-id>
+```
+
+响应包含当前状态、generation、重试时间，以及最近 20 条脱敏 attempt summary；不会返回请求 Body、敏感 Header、Credential、Supplier idempotency value 或 lease 信息。
+
+停止本地环境但保留开发 Volume：
+
+```sh
+make down
+```
+
 ## 整体架构与核心设计
 
 ```mermaid
@@ -190,89 +273,6 @@ failed_permanent -> pending             (audited replay)
 | Failure-scenario-first Test | 以全局 100% Coverage 作为质量目标 | 直接验证事务失败、ACK 丢失、stale Worker、MQ outage 和 SSRF 零连接等风险；Coverage 只作为辅助信号 |
 
 这些选择不是通用“最佳实践”，而是针对本项目可靠性语义、MVP 范围和本地运行边界的结果。详细理由和后果记录在 [`docs/adr/`](docs/adr/)。
-
-## MVP 已实现能力
-
-- Caller API Key 鉴权与 Destination 级授权。
-- 256 KiB Header/Body 限制和 Caller-scoped idempotency。
-- 不可变 Destination version；已接受任务始终绑定接收时版本。
-- Transactional Outbox、durable identifier-only signal 和 publisher confirm。
-- At-least-once HTTPS delivery、稳定 Supplier idempotency value。
-- 有限 Worker lease、完整 fencing、超时、状态码分类和 24 小时重试窗口。
-- Destination 级 rate/concurrency limiter 和 durable delay queue。
-- 永久失败、最近 20 次脱敏 attempt summary 和授权人工 Replay。
-- 任务/Signal 恢复、终态留存、backpressure、Metrics、Liveness 和 Readiness。
-- 注册目标、禁重定向、Header 保护、DNS/IP 检查、validated-IP dialing、TLS hostname verification、动态 Secret 解析和日志脱敏。
-
-系统明确不承诺 Exactly-once、跨任务顺序、Supplier 后续业务结果，也不负责上游业务事务与通知提交之间的原子性。
-
-## 快速开始
-
-### 环境要求
-
-- Go 1.26.x
-- Docker 和 Docker Compose
-- Make、POSIX Shell、Bash、`jq`、`curl`
-
-```sh
-make preflight
-make up
-```
-
-默认本地环境会启动：
-
-- API：`http://localhost:18080`
-- PostgreSQL：`localhost:15432`
-- RabbitMQ AMQP：`localhost:15672`
-- RabbitMQ Management：`http://localhost:25672`
-- Test-only fake HTTPS Supplier
-
-检查服务：
-
-```sh
-curl --fail http://localhost:18080/healthz
-curl --fail http://localhost:18080/readyz
-curl --fail http://localhost:18080/metrics
-```
-
-本地 Compose 只用于开发测试，内置凭据均为 test-only。
-
-### 提交通知
-
-```sh
-curl --fail-with-body \
-  -H 'Authorization: Bearer caller-a-test-key' \
-  -H 'Idempotency-Key: registration-10001' \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "destination_id": "supplier-a",
-    "method": "POST",
-    "headers": {
-      "Content-Type": "application/json",
-      "X-Event-Type": "user.registered"
-    },
-    "body_base64": "eyJ1c2VyX2lkIjoiMTAwMDEifQ=="
-  }' \
-  http://localhost:18080/deliveries
-```
-
-`body_base64` 在这个示例中表示 `{"user_id":"10001"}`。成功响应是任务已经在 PostgreSQL 中持久化后的 `202 Accepted`，不会等待 fake Supplier。
-
-### 查询状态
-
-```sh
-curl --fail-with-body \
-  -H 'Authorization: Bearer caller-a-test-key' \
-  http://localhost:18080/deliveries/<delivery-id>
-```
-
-响应包含当前状态、generation、重试时间，以及最近 20 条脱敏 attempt summary；不会返回请求 Body、敏感 Header、Credential、Supplier idempotency value 或 lease 信息。
-
-停止本地环境但保留开发 Volume：
-
-```sh
-make down
-```
 
 ## 验证与容量证据
 
