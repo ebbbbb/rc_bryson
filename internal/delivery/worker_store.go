@@ -26,6 +26,31 @@ type AttemptResult struct {
 	FinishedAt     time.Time
 }
 
+func (store *Store) EligibleDestination(
+	ctx context.Context,
+	deliveryID string,
+	generation int64,
+) (DestinationVersion, error) {
+	var destinationID string
+	var destinationVersion int64
+	err := store.pool.QueryRow(ctx, `
+		SELECT destination_id, destination_version
+		FROM deliveries
+		WHERE id = $1
+			AND generation = $2
+			AND status = 'pending'
+			AND next_attempt_at <= clock_timestamp()
+			AND retry_deadline > clock_timestamp()
+	`, deliveryID, generation).Scan(&destinationID, &destinationVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DestinationVersion{}, ErrDeliveryNotClaimable
+	}
+	if err != nil {
+		return DestinationVersion{}, fmt.Errorf("check delivery eligibility: %w", err)
+	}
+	return queryDestinationVersion(ctx, store.pool, destinationID, destinationVersion)
+}
+
 func (store *Store) ClaimDelivery(
 	ctx context.Context,
 	deliveryID string,

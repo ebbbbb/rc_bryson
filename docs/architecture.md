@@ -43,12 +43,15 @@ failed only through a committed PostgreSQL state transition.
 
 ### Worker
 
-Consumes a signal, conditionally leases the matching PostgreSQL delivery, performs
-one HTTPS attempt outside the database transaction, records the result, and only
-then ACKs the signal. Duplicate, stale, or terminal-state messages are acknowledged
-without sending. Each lease has an owner and an unguessable token. Every result
-transition is fenced by delivery ID, generation, `delivering` state, lease owner,
-lease token, and an unexpired lease; a zero-row update is stale and is discarded.
+Consumes a signal, performs a read-only eligibility and immutable-destination
+lookup, waits for destination capacity without holding a lease, and then
+conditionally leases the matching PostgreSQL delivery with a second generation,
+state, due-time, and deadline check. It performs one HTTPS attempt outside the
+database transaction, records the result, and only then ACKs the signal. Duplicate,
+stale, or terminal-state messages are acknowledged without sending. Each lease has
+an owner and an unguessable token. Every result transition is fenced by delivery
+ID, generation, `delivering` state, lease owner, lease token, and an unexpired
+lease; a zero-row update is stale and is discarded.
 
 ### Retry Scheduler
 
@@ -169,21 +172,25 @@ No other operation advances generation.
 ### Attempt
 
 1. Consume a message without ACK.
-2. Atomically change the matching current generation from `pending` to
-   `delivering` only when `next_attempt_at <= now`, assigning a finite lease owner,
-   unique lease token, and lease deadline.
-3. If the message is stale, duplicate, terminal, or early, ACK without connecting.
-4. Load the delivery's immutable destination version, resolve its current secret,
-   enforce protected headers and destination-global rate/concurrency limits,
+2. Read the matching current, pending, and due generation plus its immutable
+   destination version. If the message is stale, duplicate, terminal, early, or
+   beyond its retry deadline, ACK without connecting.
+3. Wait for destination-global rate and concurrency capacity without holding a
+   delivery lease.
+4. Atomically change the matching generation from `pending` to `delivering`,
+   rechecking generation, state, `next_attempt_at`, and retry deadline while
+   assigning a finite lease owner, unique lease token, and lease deadline. If the
+   check no longer matches, ACK without connecting.
+5. Resolve the destination version's current secret, enforce protected headers,
    validate DNS/IP policy, and bind the validated IP to the actual TLS connection
    with hostname verification and redirects disabled.
-5. Send the HTTPS request outside a database transaction.
-6. Commit the attempt plus success, permanent failure, or retryable result using
+6. Send the HTTPS request outside a database transaction.
+7. Commit the attempt plus success, permanent failure, or retryable result using
    the complete fencing predicate. A retryable result advances generation and
    records `next_attempt_at`; if the next attempt would exceed the cycle deadline,
    commit `failed_permanent` instead.
-7. If the fenced update affects zero rows, discard the stale result.
-8. ACK only after a committed result or a definitive stale-message/result
+8. If the fenced update affects zero rows, discard the stale result.
+9. ACK only after a committed result or a definitive stale-message/result
    decision. Database uncertainty is not a reason to ACK.
 
 ### Recovery
@@ -201,7 +208,8 @@ No other operation advances generation.
 
 1. `202` implies the delivery and initial Outbox event committed atomically.
 2. No pre-send path can transition a delivery to `succeeded`.
-3. Every `delivering` state has a finite lease and is reclaimable after expiry.
+3. A Worker waits for destination capacity before creating a finite delivery
+   lease; every `delivering` state is reclaimable after lease expiry.
 4. Duplicate queue messages are harmless, but duplicate HTTP sends remain possible.
 5. Retryable and permanent failures have distinct state transitions and metrics.
 6. Sensitive headers, credentials, and bodies never enter logs or queue messages.

@@ -21,10 +21,19 @@ type fakeStore struct {
 	destination delivery.DestinationVersion
 	claimErr    error
 	completeErr error
+	claims      atomic.Int32
 	completes   atomic.Int32
 	retries     atomic.Int32
 	permanents  atomic.Int32
 	complete    chan struct{}
+}
+
+func (store *fakeStore) EligibleDestination(
+	context.Context,
+	string,
+	int64,
+) (delivery.DestinationVersion, error) {
+	return store.destination, store.claimErr
 }
 
 func (store *fakeStore) ClaimDelivery(
@@ -34,6 +43,7 @@ func (store *fakeStore) ClaimDelivery(
 	string,
 	time.Duration,
 ) (delivery.Delivery, delivery.DestinationVersion, error) {
+	store.claims.Add(1)
 	return store.task, store.destination, store.claimErr
 }
 
@@ -121,6 +131,58 @@ func TestSuccessIsNotCommittedBeforeSupplierResponse(t *testing.T) {
 	}
 	if store.completes.Load() != 1 {
 		t.Fatal("success was not committed after supplier response")
+	}
+}
+
+func TestDestinationPermitIsAcquiredBeforeLeaseClaim(t *testing.T) {
+	release := make(chan struct{})
+	store := successfulFakeStore()
+	store.destination.DestinationID = "slow-destination"
+	store.destination.MaxConcurrency = 1
+	store.destination.RatePerSecond = 1_000_000
+	sender := &fakeSender{release: release}
+	instance := newTestWorker(t, store, sender)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := instance.Process(context.Background(), dispatch.Signal{
+			DeliveryID: "delivery-1",
+			Generation: 0,
+		})
+		firstDone <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for sender.calls.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sender.calls.Load() != 1 || store.claims.Load() != 1 {
+		t.Fatalf(
+			"first delivery sends=%d claims=%d, want one send and one lease",
+			sender.calls.Load(),
+			store.claims.Load(),
+		)
+	}
+
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := instance.Process(secondContext, dispatch.Signal{
+			DeliveryID: "delivery-2",
+			Generation: 0,
+		})
+		secondDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if got := store.claims.Load(); got != 1 {
+		t.Fatalf("lease claims while second delivery waits for limiter = %d, want 1", got)
+	}
+	cancelSecond()
+	if err := <-secondDone; err == nil {
+		t.Fatal("cancelled limiter wait returned nil error")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

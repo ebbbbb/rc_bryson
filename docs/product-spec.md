@@ -78,7 +78,11 @@ manual replay.
 
 ### Inspect and replay
 
-- A caller can inspect only its own delivery status and a redacted attempt summary.
+- A caller can inspect only its own delivery status and the 20 most recent attempt
+  summaries, newest first. Each summary is limited to generation, result class,
+  response status, bounded error category, start time, and finish time; it excludes
+  request headers and body, credentials, supplier idempotency value, and lease
+  metadata.
 - An operator may replay a permanently failed delivery with an auditable actor and
   reason. Replay preserves the logical delivery ID, original `accepted_at`,
   destination version, and stable supplier idempotency value; advances generation;

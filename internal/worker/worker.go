@@ -16,6 +16,11 @@ import (
 )
 
 type Store interface {
+	EligibleDestination(
+		context.Context,
+		string,
+		int64,
+	) (delivery.DestinationVersion, error)
 	ClaimDelivery(
 		context.Context,
 		string,
@@ -79,6 +84,24 @@ func New(
 
 // Process returns true only when the broker message can be acknowledged.
 func (worker *Worker) Process(ctx context.Context, signal dispatch.Signal) (bool, error) {
+	destination, err := worker.store.EligibleDestination(
+		ctx,
+		signal.DeliveryID,
+		signal.Generation,
+	)
+	if errors.Is(err, delivery.ErrDeliveryNotClaimable) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check delivery eligibility: %w", err)
+	}
+
+	release, err := worker.limiter.acquire(ctx, destination)
+	if err != nil {
+		return false, fmt.Errorf("wait for destination capacity: %w", err)
+	}
+	defer release()
+
 	task, destination, err := worker.store.ClaimDelivery(
 		ctx,
 		signal.DeliveryID,
@@ -92,12 +115,6 @@ func (worker *Worker) Process(ctx context.Context, signal dispatch.Signal) (bool
 	if err != nil {
 		return false, fmt.Errorf("claim delivery: %w", err)
 	}
-
-	release, err := worker.limiter.acquire(ctx, destination)
-	if err != nil {
-		return false, fmt.Errorf("wait for destination capacity: %w", err)
-	}
-	defer release()
 
 	startedAt := worker.now().UTC()
 	result, err := worker.sender.Send(ctx, task, destination)

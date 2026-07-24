@@ -264,6 +264,56 @@ func (store *Store) Get(ctx context.Context, callerID, deliveryID string) (Deliv
 	return delivery, nil
 }
 
+func (store *Store) ListAttemptSummaries(
+	ctx context.Context,
+	callerID string,
+	deliveryID string,
+	limit int,
+) ([]AttemptSummary, error) {
+	if limit <= 0 {
+		return nil, errors.New("attempt summary limit must be positive")
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			attempt.generation,
+			attempt.result_class,
+			attempt.response_status,
+			attempt.error_category,
+			attempt.started_at,
+			attempt.finished_at
+		FROM delivery_attempts AS attempt
+		JOIN deliveries AS delivery ON delivery.id = attempt.delivery_id
+		WHERE delivery.id = $1
+			AND delivery.caller_id = $2
+		ORDER BY attempt.started_at DESC, attempt.id DESC
+		LIMIT $3
+	`, deliveryID, callerID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list delivery attempt summaries: %w", err)
+	}
+	defer rows.Close()
+
+	summaries := make([]AttemptSummary, 0)
+	for rows.Next() {
+		var summary AttemptSummary
+		if err := rows.Scan(
+			&summary.Generation,
+			&summary.ResultClass,
+			&summary.ResponseStatus,
+			&summary.ErrorCategory,
+			&summary.StartedAt,
+			&summary.FinishedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan delivery attempt summary: %w", err)
+		}
+		summaries = append(summaries, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate delivery attempt summaries: %w", err)
+	}
+	return summaries, nil
+}
+
 func (store *Store) Bootstrap(ctx context.Context, config BootstrapConfig) error {
 	if config.CallerID == "" || config.CallerAPIKey == "" ||
 		config.Destination.DestinationID == "" || config.Destination.Version <= 0 {

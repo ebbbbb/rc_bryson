@@ -15,6 +15,7 @@ import (
 const (
 	maxDeliveryPayloadBytes = 256 * 1024
 	maxSubmissionJSONBytes  = 512 * 1024
+	statusAttemptLimit      = 20
 )
 
 type API struct {
@@ -51,14 +52,24 @@ type submissionRequest struct {
 }
 
 type deliveryResponse struct {
-	ID                 string    `json:"id"`
-	Status             string    `json:"status"`
-	DestinationID      string    `json:"destination_id"`
-	DestinationVersion int64     `json:"destination_version"`
-	Generation         int64     `json:"generation"`
-	AcceptedAt         time.Time `json:"accepted_at"`
-	NextAttemptAt      time.Time `json:"next_attempt_at"`
-	RetryDeadline      time.Time `json:"retry_deadline"`
+	ID                 string                    `json:"id"`
+	Status             string                    `json:"status"`
+	DestinationID      string                    `json:"destination_id"`
+	DestinationVersion int64                     `json:"destination_version"`
+	Generation         int64                     `json:"generation"`
+	AcceptedAt         time.Time                 `json:"accepted_at"`
+	NextAttemptAt      time.Time                 `json:"next_attempt_at"`
+	RetryDeadline      time.Time                 `json:"retry_deadline"`
+	Attempts           *[]attemptSummaryResponse `json:"attempts,omitempty"`
+}
+
+type attemptSummaryResponse struct {
+	Generation     int64     `json:"generation"`
+	ResultClass    string    `json:"result_class"`
+	ResponseStatus *int      `json:"response_status"`
+	ErrorCategory  *string   `json:"error_category"`
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
 }
 
 func (api *API) submit(response http.ResponseWriter, request *http.Request) {
@@ -180,7 +191,30 @@ func (api *API) get(response http.ResponseWriter, request *http.Request) {
 		api.internalError(response, "get_delivery", err)
 		return
 	}
-	writeJSON(response, http.StatusOK, responseFromDelivery(delivery))
+	attempts, err := api.store.ListAttemptSummaries(
+		request.Context(),
+		callerID,
+		delivery.ID,
+		statusAttemptLimit,
+	)
+	if err != nil {
+		api.internalError(response, "list_delivery_attempts", err)
+		return
+	}
+	payload := responseFromDelivery(delivery)
+	summaries := make([]attemptSummaryResponse, 0, len(attempts))
+	for _, attempt := range attempts {
+		summaries = append(summaries, attemptSummaryResponse{
+			Generation:     attempt.Generation,
+			ResultClass:    attempt.ResultClass,
+			ResponseStatus: attempt.ResponseStatus,
+			ErrorCategory:  attempt.ErrorCategory,
+			StartedAt:      attempt.StartedAt,
+			FinishedAt:     attempt.FinishedAt,
+		})
+	}
+	payload.Attempts = &summaries
+	writeJSON(response, http.StatusOK, payload)
 }
 
 type replayRequest struct {

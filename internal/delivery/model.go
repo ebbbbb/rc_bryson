@@ -63,6 +63,15 @@ type Delivery struct {
 	LeaseUntil               time.Time
 }
 
+type AttemptSummary struct {
+	Generation     int64
+	ResultClass    string
+	ResponseStatus *int
+	ErrorCategory  *string
+	StartedAt      time.Time
+	FinishedAt     time.Time
+}
+
 type Submission struct {
 	CallerID                 string
 	IdempotencyKey           string

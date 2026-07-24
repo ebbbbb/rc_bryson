@@ -156,12 +156,15 @@ Independent verification:
 - Every success, retryable, and permanent result with a stale generation, owner, or
   lease token affects zero rows and cannot overwrite reclaimed work.
 - An ambiguous attempt may resend with the same supplier idempotency value.
+- A Worker waiting for destination capacity holds no delivery lease. After capacity
+  is granted, its atomic claim rechecks generation, pending state, due time, and
+  retry deadline before any HTTP connection.
 - A throttled or slow destination does not consume another destination's capacity.
 
 Stop condition: deterministic clock-driven tests prove retry timing and expiry,
 ACK-loss cannot bypass `next_attempt_at`, every stale Worker result is fenced out,
-and a killed Worker is reclaimed without an early concurrent lease. Evidence
-command: `make verify-slice SLICE=4`.
+limiter wait time does not consume lease lifetime, and a killed Worker is reclaimed
+without an early concurrent lease. Evidence command: `make verify-slice SLICE=4`.
 
 ## Slice 5 — Permanent failure and audited replay
 
