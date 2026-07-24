@@ -1,49 +1,35 @@
 # 可靠外部 HTTP 通知服务
 
-这是一个面向企业内部系统的可靠 HTTP(S) 通知服务。业务系统提交目标
-`destination_id`、最终请求 Header 和 Body 后即可结束请求；服务负责持久化任务，
-并异步调用预注册的外部供应商 API。
+这是一个面向企业内部系统的可靠 HTTP(S) 通知服务。业务系统提交目标 `destination_id`、最终请求 Header 和 Body 后即可结束请求；服务负责持久化任务，并异步调用预注册的外部供应商 API。
 
-当前仓库已经完成最小可运行 MVP：Go 服务、PostgreSQL、RabbitMQ、数据库迁移、
-测试用 HTTPS Supplier，以及从接收、异步投递、失败重试到人工 Replay 的完整链路
-均可通过 Docker Compose 运行。
+当前仓库已经完成最小可运行 MVP：Go 服务、PostgreSQL、RabbitMQ、数据库迁移、测试用 HTTPS Supplier，以及从接收、异步投递、失败重试到人工 Replay 的完整链路均可通过 Docker Compose 运行。
 
-> 当前目标是验证可靠投递模型，而不是直接满足生产部署要求。生产化所需能力及
-> 可复用设计见[从 MVP 演进到生产](#从-mvp-演进到生产)。
+> 当前目标是验证可靠投递模型，而不是直接满足生产部署要求。生产化所需能力及可复用设计见 [从 MVP 演进到生产](#从-mvp-演进到生产)。
 
 ## 对问题的理解
 
-这个问题的核心不是“发送一次 HTTP 请求”，而是让业务系统能够放心地把不可靠的
-外部调用交给一个独立服务处理。
+这个问题的核心不是“发送一次 HTTP 请求”，而是让业务系统能够放心地把不可靠的外部调用交给一个独立服务处理。
 
 ### 异步响应不等于可靠接收
 
-业务系统不等待 Supplier 响应，因此 API 返回成功只能表示通知任务已经被可靠接收，
-不能表示 Supplier 已经完成业务操作。本项目规定：
+业务系统不等待 Supplier 响应，因此 API 返回成功只能表示通知任务已经被可靠接收，不能表示 Supplier 已经完成业务操作。本项目规定：
 
-- 只有 `delivery` 和初始 Outbox event 在同一个 PostgreSQL 事务中提交后才返回
-  `202 Accepted`。
+- 只有 `delivery` 和初始 Outbox event 在同一个 PostgreSQL 事务中提交后才返回 `202 Accepted`。
 - PostgreSQL 是任务状态、重试计划、幂等记录和审计记录的唯一事实源。
-- RabbitMQ 不保存业务事实，只承载可以从 PostgreSQL 重建的 identifier-only
-  dispatch signal。
+- RabbitMQ 不保存业务事实，只承载可以从 PostgreSQL 重建的 identifier-only dispatch signal。
 
 ### 普通 HTTP 无法保证 Exactly-once
 
-Supplier 可能已经处理请求，但 Worker 在提交本地成功状态前崩溃。此时“不重试”
-会丢失通知，“重试”又可能产生重复副作用。因此系统采用明确的
-At-least-once 语义：
+Supplier 可能已经处理请求，但 Worker 在提交本地成功状态前崩溃。此时“不重试”会丢失通知，“重试”又可能产生重复副作用。因此系统采用明确的 At-least-once 语义：
 
 - 同一逻辑任务可能被重复发送。
 - 每个任务使用稳定的 Supplier idempotency value。
 - 当前 MVP 只接入支持幂等机制的 Supplier。
-- `succeeded` 只表示 Supplier 返回了配置认可的 HTTP 响应，不表示其后续业务一定
-  完成。
+- `succeeded` 只表示 Supplier 返回了配置认可的 HTTP 响应，不表示其后续业务一定完成。
 
 ### 数据库与消息队列之间不能直接双写
 
-如果先提交数据库再直接发布消息，进程可能在两步之间崩溃，使已接受任务永久沉默；
-反过来先发消息也可能让 Worker 看到尚未提交的任务。项目使用
-Transactional Outbox 消除这个非原子窗口：
+如果先提交数据库再直接发布消息，进程可能在两步之间崩溃，使已接受任务永久沉默；反过来先发消息也可能让 Worker 看到尚未提交的任务。项目使用 Transactional Outbox 消除这个非原子窗口：
 
 1. API 在一个数据库事务中写入 delivery 和 Outbox event。
 2. Publisher 异步发布 Outbox event，并等待 RabbitMQ publisher confirm。
@@ -52,15 +38,11 @@ Transactional Outbox 消除这个非原子窗口：
 
 ### 外部 HTTP 调用同时是安全边界
 
-如果 Caller 能控制 URL、认证 Header 或重定向目标，服务就可能成为携带内部凭据的
-SSRF Proxy。因此 URL 和安全策略必须预注册并版本化；实际发送前仍需执行 DNS/IP
-校验，将已验证 IP 固定到真实 socket，同时保留注册 hostname 做 TLS verification。
+如果 Caller 能控制 URL、认证 Header 或重定向目标，服务就可能成为携带内部凭据的 SSRF Proxy。因此 URL 和安全策略必须预注册并版本化；实际发送前仍需执行 DNS/IP 校验，将已验证 IP 固定到真实 socket，同时保留注册 hostname 做 TLS verification。
 
 ### 慢 Supplier 不能破坏整个系统
 
-不同 Destination 的超时、限流和故障相互独立。Worker 在取得 Destination capacity
-前不持有 delivery lease；容量不足时，将同一 identifier-only signal 写入 durable
-delay queue 后释放 RabbitMQ consumer credit，避免一个慢目标占满全部 Worker。
+不同 Destination 的超时、限流和故障相互独立。Worker 在取得 Destination capacity 前不持有 delivery lease；容量不足时，将同一 identifier-only signal 写入 durable delay queue 后释放 RabbitMQ consumer credit，避免一个慢目标占满全部 Worker。
 
 ## 整体架构与核心设计
 
@@ -84,9 +66,7 @@ flowchart LR
     MQ --> Metrics
 ```
 
-这些名称代表逻辑职责，不代表必须拆成多个 Microservice。MVP 将 API、Publisher、
-Worker、Scheduler、Reconciler、Retention 和告警循环放在同一应用进程中，减少本地
-部署复杂度；PostgreSQL、RabbitMQ 和 Supplier 是独立进程。
+这些名称代表逻辑职责，不代表必须拆成多个 Microservice。MVP 将 API、Publisher、Worker、Scheduler、Reconciler、Retention 和告警循环放在同一应用进程中，减少本地部署复杂度；PostgreSQL、RabbitMQ 和 Supplier 是独立进程。
 
 ### 组件职责
 
@@ -146,12 +126,41 @@ failed_permanent -> pending             (audited replay)
 ```
 
 - 接收任务时创建 generation `0`。
-- Worker 提交 retryable result 时立即推进 generation，并写入未来的
-  `next_attempt_at`；Scheduler 到期时只创建该 generation 的 Outbox。
-- 每个 Worker 结果都必须匹配 `delivery_id`、`generation`、`delivering` 状态、
-  `lease_owner`、`lease_token` 和未过期 lease。
+- Worker 提交 retryable result 时立即推进 generation，并写入未来的 `next_attempt_at`；Scheduler 到期时只创建该 generation 的 Outbox。
+- 每个 Worker 结果都必须匹配 `delivery_id`、`generation`、`delivering` 状态、`lease_owner`、`lease_token` 和未过期 lease。
 - 旧 signal、重复 signal 或过期 Worker 的更新影响零行，不得覆盖新状态。
 - HTTP 结果和下一步计划先提交 PostgreSQL，再 ACK RabbitMQ。
+
+## 系统边界与失败处理
+
+这个服务负责“可靠接收并尽可能可靠地投递 HTTP 通知”，不负责替代上游业务事务，也不能把普通 HTTP 包装成 Exactly-once。
+
+系统负责 Caller 鉴权和 Destination 授权、delivery 与 Outbox 原子持久化、异步 HTTPS 投递和重试，以及状态、审计、可观测性和安全出站边界。
+
+| 系统不负责 | 原因 | 责任归属或未来条件 |
+|---|---|---|
+| Supplier 业务副作用 Exactly-once | 外部 HTTP 副作用无法与本地数据库事务原子提交 | Supplier 使用稳定幂等值；系统保持 At-least-once |
+| 注册、付款、库存等领域事件转换 | 这会把通知服务扩成 Connector Platform | Caller 提交最终 Header 和 Body |
+| Supplier 收到请求后的业务结果 | HTTP 成功只证明配置认可的响应，服务看不到后续处理 | Supplier 自身状态或独立对账 |
+| 上游业务事务与通知提交的原子性 | 服务无法参与 Caller 的本地事务 | Caller 在需要时使用自己的 Outbox |
+| 跨任务顺序 | 当前需求未要求，排序会限制并发和故障隔离 | 出现明确业务键顺序需求后单独设计 |
+| 任意 URL 的通用 HTTP Proxy | 会突破授权、凭据与 SSRF 边界 | 只允许预注册且版本化的 HTTPS Destination |
+| 无限重试和 Multi-region HA | 会引入无界积压和生产部署复杂度 | 24 小时后永久失败；HA 留到生产化阶段 |
+
+关键故障的处理原则如下：
+
+| 故障 | 系统行为 | 仍然存在的边界 |
+|---|---|---|
+| PostgreSQL 不可用或事务失败 | 不返回 `202`，不声称任务已被接收 | Caller 必须使用同一幂等键重试 |
+| RabbitMQ 不可用 | API 仍可写 PostgreSQL；Outbox 等待恢复后发布 | 受数据库容量和 backlog 阈值限制 |
+| Publisher 在 confirm 后、标记前崩溃 | Outbox 会再次发布同一 signal | 允许重复 signal，不会创建第二个逻辑 delivery |
+| Worker 持有 lease 时崩溃 | lease 过期后 Reconciler 推进 generation 并创建 repair Outbox | 若 Supplier 已处理但本地未提交，可能重复外呼 |
+| 已发布 signal 可证明丢失 | Reconciler 重置同一 generation 的 Outbox，由 Publisher 重新发布 | Reconciler 故障会延迟恢复；MQ 仍不是事实源 |
+| 旧 generation、重复或乱序 signal | PostgreSQL 条件更新判定为 stale，安全 ACK 且不连接 | MQ 本身不证明任务是否仍需发送 |
+| Supplier 超时、限流或 `5xx` | 使用同一幂等值，按退避、抖动和 `Retry-After` 重试 | 不支持幂等的 Supplier 仍可能重复执行 |
+| Supplier 持续不可用至 retry deadline | 24 小时内自动重试；随后进入 `failed_permanent`，通过 Metrics 暴露，Operator 调查后可审计 Replay | 不进行无限自动重试，业务恢复需要明确责任人 |
+
+完整 Failure Model 和 Crash Window 见 [`docs/architecture.md`](docs/architecture.md#failure-model)。
 
 ## 技术选型
 
@@ -165,9 +174,22 @@ failed_permanent -> pending             (audited replay)
 | Metrics | Prometheus Go client | 暴露低基数 Counter/Gauge 和标准 Prometheus endpoint |
 | Local Runtime | Docker Compose | 一条命令启动完整依赖，并支持隔离、可重复的 Integration Test |
 
-项目没有引入 ORM、第三方 HTTP Router、Redis、Testcontainers 或 Mocking
-Framework。当前需求可以由显式 SQL、Go standard library 和少量成熟依赖清晰表达，
-减少了 MVP 的概念与运维负担。
+项目没有引入 ORM、第三方 HTTP Router、Redis、Testcontainers 或 Mocking Framework。当前需求可以由显式 SQL、Go standard library 和少量成熟依赖清晰表达，减少了 MVP 的概念与运维负担。
+
+## 关键工程决策与取舍
+
+| 决策 | 未采用的替代方案 | 取舍 |
+|---|---|---|
+| PostgreSQL 唯一事实源 + Transactional Outbox | 数据库提交后直接发 MQ、MQ 作为事实源、分布式事务 | Outbox 消除不可恢复的双写窗口，并允许只依赖数据库重建 signal；代价是增加 Publisher、Reconciler 和 Outbox 清理 |
+| RabbitMQ identifier-only signal layer | PostgreSQL-only polling、Cloud-managed Queue | RabbitMQ 提供 confirm、ACK、redelivery、delay 和 Worker 隔离；若不使用它，MVP 可由 PostgreSQL `SKIP LOCKED` polling 实现并减少一个组件，但会增加数据库轮询压力、降低调度与 HTTP Worker 的故障隔离 |
+| At-least-once + 稳定 Supplier idempotency value | Exactly-once、At-most-once | 在“Supplier 已处理但响应或本地提交丢失”的模糊窗口中，优先避免静默丢失；明确接受重复发送风险 |
+| 预注册且版本化的 HTTPS Destination | Caller 传入任意 URL、通用 HTTP Proxy | 收窄灵活性以换取授权、凭据隔离、SSRF 控制和可复现请求语义 |
+| 单一 Binary 中承载多个独立 Loop | 从第一天拆成多个 Microservice | 保留逻辑职责和独立扩展边界，但不为本地 MVP 支付额外部署、发现和运维成本 |
+| 单 Worker + in-process Destination limiter | Redis、分布式 Rate-limit Service | 满足当前容量模型且不增加新状态源；横向扩展前必须通过新 ADR 选择共享协调机制 |
+| `net/http`、显式 SQL 和少量成熟依赖 | 第三方 Router、ORM、Mocking Framework、Testcontainers | 让事务、fencing 和网络安全路径保持可见；接受更多手写 SQL 与测试 Harness |
+| Failure-scenario-first Test | 以全局 100% Coverage 作为质量目标 | 直接验证事务失败、ACK 丢失、stale Worker、MQ outage 和 SSRF 零连接等风险；Coverage 只作为辅助信号 |
+
+这些选择不是通用“最佳实践”，而是针对本项目可靠性语义、MVP 范围和本地运行边界的结果。详细理由和后果记录在 [`docs/adr/`](docs/adr/)。
 
 ## MVP 已实现能力
 
@@ -180,11 +202,9 @@ Framework。当前需求可以由显式 SQL、Go standard library 和少量成�
 - Destination 级 rate/concurrency limiter 和 durable delay queue。
 - 永久失败、最近 20 次脱敏 attempt summary 和授权人工 Replay。
 - 任务/Signal 恢复、终态留存、backpressure、Metrics、Liveness 和 Readiness。
-- 注册目标、禁重定向、Header 保护、DNS/IP 检查、validated-IP dialing、
-  TLS hostname verification、动态 Secret 解析和日志脱敏。
+- 注册目标、禁重定向、Header 保护、DNS/IP 检查、validated-IP dialing、TLS hostname verification、动态 Secret 解析和日志脱敏。
 
-系统明确不承诺 Exactly-once、跨任务顺序、Supplier 后续业务结果，也不负责上游业务
-事务与通知提交之间的原子性。
+系统明确不承诺 Exactly-once、跨任务顺序、Supplier 后续业务结果，也不负责上游业务事务与通知提交之间的原子性。
 
 ## 快速开始
 
@@ -236,8 +256,7 @@ curl --fail-with-body \
   http://localhost:18080/deliveries
 ```
 
-`body_base64` 在这个示例中表示 `{"user_id":"10001"}`。成功响应是任务已经在
-PostgreSQL 中持久化后的 `202 Accepted`，不会等待 fake Supplier。
+`body_base64` 在这个示例中表示 `{"user_id":"10001"}`。成功响应是任务已经在 PostgreSQL 中持久化后的 `202 Accepted`，不会等待 fake Supplier。
 
 ### 查询状态
 
@@ -247,9 +266,7 @@ curl --fail-with-body \
   http://localhost:18080/deliveries/<delivery-id>
 ```
 
-响应包含当前状态、generation、重试时间，以及最近 20 条脱敏 attempt summary；
-不会返回请求 Body、敏感 Header、Credential、Supplier idempotency value 或 lease
-信息。
+响应包含当前状态、generation、重试时间，以及最近 20 条脱敏 attempt summary；不会返回请求 Body、敏感 Header、Credential、Supplier idempotency value 或 lease 信息。
 
 停止本地环境但保留开发 Volume：
 
@@ -265,9 +282,7 @@ make down
 make verify
 ```
 
-它依次执行 Preflight、Formatting、Static Analysis、module/Compose 检查、repo skill
-validation、Unit Test、Hook fixture、Race Test、镜像健康检查、PostgreSQL/RabbitMQ
-持久性与协议 Probe，以及隔离 Integration Test。
+它依次执行 Preflight、Formatting、Static Analysis、module/Compose 检查、项目级 Skill validation、Unit Test、Hook fixture、Race Test、镜像健康检查、PostgreSQL/RabbitMQ 持久性与协议 Probe，以及隔离 Integration Test。
 
 常用独立入口：
 
@@ -281,8 +296,7 @@ make capacity
 make verify-slice SLICE=4
 ```
 
-最近一次本地容量验收在健康依赖、无现有积压、单 Worker、Destination 限制
-250 req/s 和 concurrency 8 的条件下，以约 100 submissions/s 提交 200 个任务：
+最近一次本地容量验收在健康依赖、无现有积压、单 Worker、Destination 限制 250 req/s 和 concurrency 8 的条件下，以约 100 submissions/s 提交 200 个任务：
 
 | 指标 | 结果 |
 |---|---:|
@@ -292,14 +306,19 @@ make verify-slice SLICE=4
 | First-attempt p99 | 1.176 s |
 | First-attempt maximum | 1.669 s |
 
-这只证明该本地 Profile 支持拟议的 `p99 <= 60s`，不是无条件 Production SLO。
-完整条件和 Crash-window 证据见
-[`docs/capacity-report.md`](docs/capacity-report.md)。
+这只证明该本地 Profile 支持拟议的 `p99 <= 60s`，不是无条件 Production SLO。完整条件和 Crash-window 证据见 [`docs/capacity-report.md`](docs/capacity-report.md)。
+
+## AI Agent 协作与工程控制
+
+使用 AI Agent 完成需求调查、方案比较、实现、验证和 Code Review；本人保留产品语义、架构批准、范围控制和最终验收权。项目使用 Codex 原生 Plan mode 收集上下文、澄清需求并形成计划，使用 Goal 维持长任务连续性，以项目级 Skill 固化专属流程、Hooks 执行机械门禁，并用 `AGENTS.md` 保存长期规则、`CLAUDE.md` 统一引用同一规则源。
+
+项目开始阶段调研后未引入 Superpowers 和 Spec Kit，使用 Codex 原生能力避免重复控制、额外 Token 和过重文档。Code Review 采用两层检查：Commit 前结合 `skill-creator` 创建的项目专属 Review Skill 与 Codex 原生 Code Review，提交 PR 后由 GitHub 中的 ChatGPT/Codex 集成自动执行第二轮审查；[PR #2 Review](https://github.com/ebbbbb/rc_bryson/pull/2#pullrequestreview-4770012392) 是自动流程成功运行的证据。
+
+三个任务的分工、工具取舍、未采纳建议和关键人工决策见 [`docs/ai-usage.md`](docs/ai-usage.md)。
 
 ## 从 MVP 演进到生产
 
-现有实现刻意保留了可以继续复用的可靠性核心。生产化通常不需要重写状态机、
-Outbox、generation 或 fencing，而是替换外围 Adapter、增强部署拓扑和补齐运营能力。
+现有实现刻意保留了可以继续复用的可靠性核心。生产化通常不需要重写状态机、Outbox、generation 或 fencing，而是替换外围 Adapter、增强部署拓扑和补齐运营能力。
 
 | 生产需求 | MVP 当前实现 | 可能引入的技术 | 可复用与扩展方式 |
 |---|---|---|---|
@@ -313,10 +332,7 @@ Outbox、generation 或 fencing，而是替换外围 Adapter、增强部署拓�
 | Observability | Prometheus Metrics + structured `slog` | Prometheus、Grafana、Alertmanager、OpenTelemetry、集中日志平台 | 复用现有低基数 Metrics 与 bounded error category，增加 Trace/Alert sink |
 | 部署与扩缩容 | Docker Compose、单应用进程 | Kubernetes、ECS、Nomad 或企业现有 Runtime | 同一 Binary 中职责已分离为独立 Loop，可先整体部署，也可按测量结果拆分 |
 
-如果生产平台选择 SQS、Pub/Sub 或 Kafka 而不是 RabbitMQ，需要新增 ADR 并实现新的
-Signal Broker Adapter；PostgreSQL 事实源、Transactional Outbox 和 Worker fencing
-仍可保留。Redis 也不是默认必需项，只有在多 Worker 实例需要严格的
-Destination-global limiter 时才值得引入。
+如果生产平台选择 SQS、Pub/Sub 或 Kafka 而不是 RabbitMQ，需要新增 ADR 并实现新的 Signal Broker Adapter；PostgreSQL 事实源、Transactional Outbox 和 Worker fencing 仍可保留。Redis 也不是默认必需项，只有在多 Worker 实例需要严格的 Destination-global limiter 时才值得引入。
 
 优先的生产化顺序通常是：
 
@@ -335,8 +351,8 @@ migrations/          PostgreSQL Schema Migration
 test/integration/     按故障场景组织的 Integration Test
 testdata/             Test-only TLS Fixture
 docs/                Product Spec、Architecture、ADR、执行计划和运维说明
-.agents/skills/      Repository-level Codex Skill
-.codex/              Codex Hook 与 Fixture
+.agents/skills/      项目级 AI Agent Skill
+.codex/              AI Agent Hook 与 Fixture
 ```
 
 - [`docs/product-spec.md`](docs/product-spec.md)：外部行为、范围和非目标
@@ -344,6 +360,8 @@ docs/                Product Spec、Architecture、ADR、执行计划和运维�
 - [`docs/adr/`](docs/adr/)：架构决策及取舍
 - [`docs/exec-plan.md`](docs/exec-plan.md)：纵向 Slice 与可执行验收证据
 - [`docs/operations.md`](docs/operations.md)：本地恢复与 Replay 操作
-- [`AGENTS.md`](AGENTS.md)：Repository Automation Agent 的工程规则
+- [`docs/ai-usage.md`](docs/ai-usage.md)：AI Agent 分工、工程判断、纠偏和验证证据
+- [`AGENTS.md`](AGENTS.md)：项目级 AI Agent 的工程规则
+- [`CLAUDE.md`](CLAUDE.md)：依照 CLAUDE 官方说明，引用 `AGENTS.md`，避免维护第二套 AI Agent 规则
 
 测试证书和 Private Key 仅用于 fake Supplier，禁止用于真实环境或存放真实 Credential。
