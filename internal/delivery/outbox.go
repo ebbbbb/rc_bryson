@@ -89,6 +89,7 @@ func (store *Store) MarkOutboxPublished(ctx context.Context, event OutboxEvent) 
 		UPDATE outbox_events
 		SET
 			published_at = clock_timestamp(),
+			observed_at = NULL,
 			lease_owner = NULL,
 			lease_token = NULL,
 			lease_until = NULL

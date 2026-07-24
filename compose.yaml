@@ -10,9 +10,12 @@ services:
     ports:
       - "${POSTGRES_PORT:-15432}:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U notifier -d notifier"]
+      test:
+        - CMD-SHELL
+        - test "$$(head -1 "$$PGDATA/postmaster.pid" 2>/dev/null)" = "1" &&
+          pg_isready -U notifier -d notifier
       interval: 2s
       timeout: 3s
       retries: 30
@@ -30,7 +33,7 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 3s
       timeout: 5s
       retries: 30
@@ -118,8 +121,6 @@ services:
       migrate:
         condition: service_completed_successfully
       postgres:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]

@@ -35,6 +35,24 @@ func (resolver *countingResolver) LookupIP(context.Context, string, string) ([]n
 	return resolver.addresses, nil
 }
 
+type blockingResolver struct {
+	calls atomic.Int32
+}
+
+func (resolver *blockingResolver) LookupIP(
+	ctx context.Context,
+	_ string,
+	_ string,
+) ([]net.IP, error) {
+	resolver.calls.Add(1)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(250 * time.Millisecond):
+		return nil, context.DeadlineExceeded
+	}
+}
+
 type fixedSecrets struct {
 	value string
 }
@@ -202,10 +220,31 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 			wantError: "forbidden address",
 		},
 		{
+			name:      "production CGNAT metadata address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("100.100.100.200")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production limited broadcast address",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("255.255.255.255")},
+			wantError: "forbidden address",
+		},
+		{
+			name:      "production benchmarking range",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "public-internet",
+			addresses: []net.IP{net.ParseIP("198.18.0.1")},
+			wantError: "forbidden address",
+		},
+		{
 			name:      "mixed DNS answers",
 			rawURL:    "https://supplier.example/notify",
 			policy:    "public-internet",
-			addresses: []net.IP{net.ParseIP("203.0.113.8"), net.ParseIP("127.0.0.1")},
+			addresses: []net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("100.100.100.200")},
 			wantError: "forbidden address",
 		},
 		{
@@ -275,6 +314,35 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 	}
 }
 
+func TestSenderRequestTimeoutIncludesDNSResolution(t *testing.T) {
+	resolver := &blockingResolver{}
+	sender, err := NewSender(
+		resolver,
+		fixedSecrets{value: "secret"},
+		false,
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, destination := testTaskAndDestination("https://supplier.example/notify")
+	destination.NetworkPolicy = "public-internet"
+	destination.RequestTimeout = 20 * time.Millisecond
+
+	started := time.Now()
+	_, err = sender.Send(t.Context(), task, destination)
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("error = %v, want attempt timeout", err)
+	}
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("DNS resolution exceeded total request timeout: %s", elapsed)
+	}
+	if resolver.calls.Load() != 1 {
+		t.Fatalf("DNS lookups = %d, want one", resolver.calls.Load())
+	}
+}
+
 func TestSenderRejectsUnavailableNetworkPolicyBeforeDNS(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -338,7 +406,7 @@ func TestSenderRejectsUnavailableNetworkPolicyBeforeDNS(t *testing.T) {
 func TestSenderPinsFirstValidatedDNSAnswerAcrossResolutionChanges(t *testing.T) {
 	resolver := &changingResolver{
 		responses: [][]net.IP{
-			{net.ParseIP("203.0.113.8")},
+			{net.ParseIP("8.8.8.8")},
 			{net.ParseIP("127.0.0.1")},
 		},
 	}
@@ -365,7 +433,7 @@ func TestSenderPinsFirstValidatedDNSAnswerAcrossResolutionChanges(t *testing.T) 
 	if resolver.calls.Load() != 1 {
 		t.Fatalf("DNS lookups = %d, want exactly one", resolver.calls.Load())
 	}
-	if dialed != "203.0.113.8:443" {
+	if dialed != "8.8.8.8:443" {
 		t.Fatalf("dialed %q, want first validated address", dialed)
 	}
 }

@@ -19,6 +19,7 @@ import (
 type fakeStore struct {
 	task        delivery.Delivery
 	destination delivery.DestinationVersion
+	eligibleErr error
 	claimErr    error
 	completeErr error
 	claims      atomic.Int32
@@ -33,7 +34,11 @@ func (store *fakeStore) EligibleDestination(
 	string,
 	int64,
 ) (delivery.DestinationVersion, error) {
-	return store.destination, store.claimErr
+	return store.destination, store.eligibleErr
+}
+
+func (store *fakeStore) ObserveSignal(context.Context, string, int64) error {
+	return nil
 }
 
 func (store *fakeStore) ClaimDelivery(
@@ -88,7 +93,7 @@ func (sender *fakeSender) Send(
 }
 
 func TestStaleSignalIsAcknowledgedWithoutSending(t *testing.T) {
-	store := &fakeStore{claimErr: delivery.ErrDeliveryNotClaimable}
+	store := &fakeStore{eligibleErr: delivery.ErrDeliveryNotClaimable}
 	sender := &fakeSender{}
 	instance := newTestWorker(t, store, sender)
 
@@ -98,6 +103,82 @@ func TestStaleSignalIsAcknowledgedWithoutSending(t *testing.T) {
 	}
 	if sender.calls.Load() != 0 || store.completes.Load() != 0 {
 		t.Fatal("stale signal caused a send or result commit")
+	}
+}
+
+func TestBusyDestinationIsDeferredWithoutClaimingLease(t *testing.T) {
+	release := make(chan struct{})
+	store := successfulFakeStore()
+	store.destination.DestinationID = "slow-destination"
+	store.destination.MaxConcurrency = 1
+	store.destination.RatePerSecond = 1
+	sender := &fakeSender{release: release}
+	instance := newTestWorker(t, store, sender)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := instance.Process(context.Background(), dispatch.Signal{
+			DeliveryID: "delivery-1",
+			Generation: 0,
+		})
+		firstDone <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for sender.calls.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sender.calls.Load() != 1 {
+		t.Fatal("first destination attempt did not start")
+	}
+
+	started := time.Now()
+	ack, err := instance.Process(t.Context(), dispatch.Signal{
+		DeliveryID: "delivery-2",
+		Generation: 0,
+	})
+	if err != nil || ack {
+		t.Fatalf("busy Process = (%t, %v), want deferred without error", ack, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("busy destination held broker credit for %s", elapsed)
+	}
+	if got := store.claims.Load(); got != 1 {
+		t.Fatalf("claims while destination busy = %d, want only first lease", got)
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedClaimRollsBackRateReservation(t *testing.T) {
+	store := successfulFakeStore()
+	store.destination.DestinationID = "rate-limited"
+	store.destination.MaxConcurrency = 1
+	store.destination.RatePerSecond = 1
+	store.claimErr = delivery.ErrDeliveryNotClaimable
+	instance := newTestWorker(t, store, &fakeSender{})
+
+	ack, err := instance.Process(t.Context(), dispatch.Signal{
+		DeliveryID: "duplicate",
+		Generation: 0,
+	})
+	if err != nil || !ack {
+		t.Fatalf("duplicate Process = (%t, %v), want stale ACK", ack, err)
+	}
+
+	store.claimErr = nil
+	started := time.Now()
+	ack, err = instance.Process(t.Context(), dispatch.Signal{
+		DeliveryID: "real",
+		Generation: 0,
+	})
+	if err != nil || !ack {
+		t.Fatalf("real Process = (%t, %v), want success", ack, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("failed duplicate claim consumed rate interval: %s", elapsed)
 	}
 }
 
@@ -163,22 +244,15 @@ func TestDestinationPermitIsAcquiredBeforeLeaseClaim(t *testing.T) {
 		)
 	}
 
-	secondContext, cancelSecond := context.WithCancel(context.Background())
-	secondDone := make(chan error, 1)
-	go func() {
-		_, err := instance.Process(secondContext, dispatch.Signal{
-			DeliveryID: "delivery-2",
-			Generation: 0,
-		})
-		secondDone <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
+	ack, err := instance.Process(t.Context(), dispatch.Signal{
+		DeliveryID: "delivery-2",
+		Generation: 0,
+	})
+	if err != nil || ack {
+		t.Fatalf("capacity-limited Process = (%t, %v), want deferred", ack, err)
+	}
 	if got := store.claims.Load(); got != 1 {
 		t.Fatalf("lease claims while second delivery waits for limiter = %d, want 1", got)
-	}
-	cancelSecond()
-	if err := <-secondDone; err == nil {
-		t.Fatal("cancelled limiter wait returned nil error")
 	}
 	close(release)
 	if err := <-firstDone; err != nil {

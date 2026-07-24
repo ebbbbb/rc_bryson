@@ -159,7 +159,8 @@ Independent verification:
 - A Worker waiting for destination capacity holds no delivery lease. After capacity
   is granted, its atomic claim rechecks generation, pending state, due time, and
   retry deadline before any HTTP connection.
-- A throttled or slow destination does not consume another destination's capacity.
+- Eight or more signals for a throttled destination release broker credit through
+  confirmed durable deferral, so a following healthy destination can proceed.
 
 Stop condition: deterministic clock-driven tests prove retry timing and expiry,
 ACK-loss cannot bypass `next_attempt_at`, every stale Worker result is fenced out,
@@ -222,15 +223,19 @@ backlog alerts.
 
 Independent verification:
 
-- Removing a queued signal does not strand the task; reconciliation recreates it.
+- Removing a queued signal does not strand the task; the running
+  Reconciler/Publisher/Worker path recreates and completes it at the same
+  generation.
 - Reconciliation is idempotent under concurrent instances.
 - Ordinary due retries are emitted only by the Retry Scheduler. Expired-lease
   repair advances generation once; missing-signal repair republishes the current
   generation without advancing it.
 - Pending tasks are never removed; successful and permanently failed tasks follow
   7-day and 30-day retention.
-- Metrics expose oldest pending age, Outbox age, expired leases, queue depth, result
-  classes, and permanent failures without high-cardinality secrets or payloads.
+- Metrics expose submission outcomes, oldest pending age, Outbox age, expired
+  leases, queue availability/depth, result classes, and permanent failures without
+  high-cardinality secrets or payloads. Database-authoritative metrics remain
+  available when RabbitMQ is down.
 
 Stop condition: deleting a signal and expiring a lease are both repaired exactly
 as documented under two concurrent reconcilers, while an ordinary future retry is

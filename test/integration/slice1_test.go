@@ -180,6 +180,43 @@ func TestSlice1AuthorizationAndValidation(t *testing.T) {
 	}
 }
 
+func TestSlice1RejectsDuplicateRawHeaderNames(t *testing.T) {
+	payload := fmt.Sprintf(
+		`{"destination_id":%q,"method":"POST","headers":{"X-Event-Type":"first","x-event-type":"second"},"body_base64":""}`,
+		testDestination,
+	)
+	request, err := http.NewRequest(
+		http.MethodPost,
+		appURL()+"/deliveries",
+		strings.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testCallerKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", uniqueKey(t))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", response.StatusCode, body)
+	}
+	var failure errorResponse
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.Error.Code != "invalid_headers" {
+		t.Fatalf("error code = %q, want invalid_headers", failure.Error.Code)
+	}
+}
+
 func TestSlice1DeliveryAndOutboxCommitAtomically(t *testing.T) {
 	key := uniqueKey(t)
 	accepted := submitDelivery(t, testCallerKey, key, testDestination, []byte(`{"atomic":true}`))

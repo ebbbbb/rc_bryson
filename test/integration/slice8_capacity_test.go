@@ -176,6 +176,10 @@ func TestSlice8CapacityAndRestartRecovery(t *testing.T) {
 	compose(t, "up", "-d", "--wait", "--wait-timeout", "120", "rabbitmq")
 	waitForDeliverySucceeded(t, pool, queueOutage.Delivery.ID, 90*time.Second)
 
+	if err := os.Setenv("WORKER_ENABLED", "false"); err != nil {
+		t.Fatal(err)
+	}
+	compose(t, "up", "-d", "--force-recreate", "--wait", "--wait-timeout", "120", "app")
 	processRestart := submitDelivery(
 		t,
 		testCallerKey,
@@ -183,8 +187,30 @@ func TestSlice8CapacityAndRestartRecovery(t *testing.T) {
 		capacityDestination,
 		[]byte(`{"slice":8,"crash":"process-restart"}`),
 	)
-	compose(t, "restart", "app")
-	compose(t, "up", "-d", "--wait", "--wait-timeout", "120", "app")
+	var processStatus string
+	var processAttempts int
+	if err := pool.QueryRow(t.Context(), `
+		SELECT
+			status,
+			(SELECT count(*) FROM delivery_attempts
+			 WHERE delivery_id = deliveries.id)
+		FROM deliveries
+		WHERE id = $1
+	`, processRestart.Delivery.ID).Scan(&processStatus, &processAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if processStatus != "pending" || processAttempts != 0 {
+		t.Fatalf(
+			"pre-crash process state=%q attempts=%d, want pending with no attempt",
+			processStatus,
+			processAttempts,
+		)
+	}
+	compose(t, "stop", "app")
+	if err := os.Setenv("WORKER_ENABLED", "true"); err != nil {
+		t.Fatal(err)
+	}
+	compose(t, "up", "-d", "--force-recreate", "--wait", "--wait-timeout", "120", "app")
 	waitForDeliverySucceeded(t, pool, processRestart.Delivery.ID, 90*time.Second)
 
 	if err := os.Setenv("WORKER_ENABLED", "false"); err != nil {

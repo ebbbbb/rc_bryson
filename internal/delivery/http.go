@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -19,9 +20,10 @@ const (
 )
 
 type API struct {
-	store  *Store
-	logger *slog.Logger
-	now    func() time.Time
+	store             *Store
+	logger            *slog.Logger
+	now               func() time.Time
+	submissionMetrics submissionMetrics
 }
 
 func NewAPI(store *Store, logger *slog.Logger) (*API, error) {
@@ -39,16 +41,24 @@ func NewAPI(store *Store, logger *slog.Logger) (*API, error) {
 }
 
 func (api *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /deliveries", api.submit)
+	mux.HandleFunc("POST /deliveries", func(response http.ResponseWriter, request *http.Request) {
+		observed := &statusResponseWriter{ResponseWriter: response}
+		api.submit(observed, request)
+		api.submissionMetrics.observe(observed.status)
+	})
 	mux.HandleFunc("GET /deliveries/{id}", api.get)
 	mux.HandleFunc("POST /deliveries/{id}/replay", api.replay)
 }
 
+func (api *API) SubmissionCounts() map[string]uint64 {
+	return api.submissionMetrics.snapshot()
+}
+
 type submissionRequest struct {
-	DestinationID string            `json:"destination_id"`
-	Method        string            `json:"method"`
-	Headers       map[string]string `json:"headers"`
-	BodyBase64    string            `json:"body_base64"`
+	DestinationID string          `json:"destination_id"`
+	Method        string          `json:"method"`
+	Headers       json.RawMessage `json:"headers"`
+	BodyBase64    string          `json:"body_base64"`
 }
 
 type deliveryResponse struct {
@@ -101,12 +111,17 @@ func (api *API) submit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	callerHeaders, err := decodeCallerHeaders(input.Headers)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_headers", "caller Header names must be unique")
+		return
+	}
 	body, err := base64.StdEncoding.DecodeString(input.BodyBase64)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_body_encoding", "body_base64 is invalid")
 		return
 	}
-	canonicalHeaders, err := CanonicalCallerHeaders(input.Headers)
+	canonicalHeaders, err := CanonicalCallerHeaders(callerHeaders)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_headers", "caller Header names must be unique")
 		return
@@ -175,6 +190,47 @@ func (api *API) submit(response http.ResponseWriter, request *http.Request) {
 	}
 
 	writeJSON(response, http.StatusAccepted, responseFromDelivery(delivery))
+}
+
+func decodeCallerHeaders(raw json.RawMessage) (map[string]string, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return map[string]string{}, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	open, err := decoder.Token()
+	if err != nil || open != json.Delim('{') {
+		return nil, errors.New("caller Headers must be a JSON object")
+	}
+	headers := make(map[string]string)
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, errors.New("caller Header name is invalid")
+		}
+		canonical := strings.ToLower(strings.TrimSpace(name))
+		if _, duplicate := seen[canonical]; duplicate {
+			return nil, errors.New("duplicate caller Header name")
+		}
+		seen[canonical] = struct{}{}
+		var value string
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("caller Header value must be a string")
+		}
+		headers[name] = value
+	}
+	closeToken, err := decoder.Token()
+	if err != nil || closeToken != json.Delim('}') {
+		return nil, errors.New("caller Headers object is invalid")
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	return headers, nil
 }
 
 func (api *API) get(response http.ResponseWriter, request *http.Request) {

@@ -5,12 +5,14 @@ package integration
 import (
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	notifierdelivery "reliable-notifier/internal/delivery"
+	"reliable-notifier/internal/dispatch"
 )
 
 func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
@@ -20,6 +22,20 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 		uniqueKey(t),
 		testDestination,
 		[]byte(`{"slice":7,"case":"stalled-signal"}`),
+	)
+	healthyBacklog := submitDelivery(
+		t,
+		testCallerKey,
+		uniqueKey(t),
+		testDestination,
+		[]byte(`{"slice":7,"case":"healthy-capacity-wait"}`),
+	)
+	runtimeLost := submitDelivery(
+		t,
+		testCallerKey,
+		uniqueKey(t),
+		testDestination,
+		[]byte(`{"slice":7,"case":"runtime-lost-signal"}`),
 	)
 	expiredLease := submitDelivery(
 		t,
@@ -82,6 +98,8 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 		"notifier_expired_leases",
 		"notifier_queue_depth",
 		"notifier_delivery_results_total",
+		"notifier_submissions_total",
+		"notifier_rabbitmq_up",
 		"notifier_permanent_failures",
 	} {
 		if !strings.Contains(string(metricsBody), metric) {
@@ -91,7 +109,11 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 
 	compose(t, "stop", "app")
 	t.Cleanup(func() {
-		composeCleanup(t, "up", "-d", "--no-deps", "app")
+		if err := os.Setenv("WORKER_ENABLED", "false"); err != nil {
+			t.Errorf("restore WORKER_ENABLED: %v", err)
+			return
+		}
+		composeCleanup(t, "up", "-d", "--force-recreate", "--no-deps", "app")
 	})
 
 	pool := integrationPool(t)
@@ -112,6 +134,16 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 				lease_until = NULL
 			WHERE delivery_id = $1
 		`, stalled.Delivery.ID},
+		{`
+			UPDATE outbox_events
+			SET
+				published_at = clock_timestamp() - interval '10 minutes',
+				observed_at = clock_timestamp(),
+				lease_owner = NULL,
+				lease_token = NULL,
+				lease_until = NULL
+			WHERE delivery_id = $1
+		`, healthyBacklog.Delivery.ID},
 		{`
 			UPDATE deliveries
 			SET
@@ -187,6 +219,17 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 		return store.ReconcileStalledSignals(t.Context(), time.Minute, 10)
 	}); repaired != 1 {
 		t.Fatalf("concurrent stalled-signal repairs = %d, want 1", repaired)
+	}
+	var healthyPublished bool
+	if err := pool.QueryRow(t.Context(), `
+		SELECT published_at IS NOT NULL
+		FROM outbox_events
+		WHERE delivery_id = $1
+	`, healthyBacklog.Delivery.ID).Scan(&healthyPublished); err != nil {
+		t.Fatal(err)
+	}
+	if !healthyPublished {
+		t.Fatal("recently observed capacity-waiting signal was falsely republished")
 	}
 	var stalledGeneration int64
 	var stalledPublished bool
@@ -282,4 +325,61 @@ func TestSlice7ReconciliationRetentionAndMetrics(t *testing.T) {
 		snapshot.ResultClasses["retryable_failure"] < 1 {
 		t.Fatalf("operational metrics missing required classes: %+v", snapshot)
 	}
+
+	connection := connectRabbit(t)
+	channel, err := connection.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, queue := range []string{dispatch.QueueName, dispatch.DeferralQueue} {
+		if _, err := channel.QueuePurge(queue, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = channel.Close()
+	_ = connection.Close()
+	if _, err := pool.Exec(t.Context(), `
+		UPDATE outbox_events
+		SET
+			published_at = clock_timestamp() - interval '10 minutes',
+			observed_at = NULL,
+			lease_owner = NULL,
+			lease_token = NULL,
+			lease_until = NULL
+		WHERE delivery_id = $1
+	`, runtimeLost.Delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("WORKER_ENABLED", "true"); err != nil {
+		t.Fatal(err)
+	}
+	compose(t, "up", "-d", "--force-recreate", "--no-deps", "app")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var status string
+		var generation int64
+		var attempts int
+		err := pool.QueryRow(t.Context(), `
+			SELECT
+				status,
+				generation,
+				(SELECT count(*) FROM delivery_attempts
+				 WHERE delivery_id = deliveries.id)
+			FROM deliveries
+			WHERE id = $1
+		`, runtimeLost.Delivery.ID).Scan(&status, &generation, &attempts)
+		if err == nil && status == "succeeded" {
+			if generation != 0 || attempts != 1 {
+				t.Fatalf(
+					"runtime signal recovery generation=%d attempts=%d, want 0 and 1",
+					generation,
+					attempts,
+				)
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("runtime Reconciler/Publisher/Worker did not recover the removed signal")
 }

@@ -54,6 +54,10 @@ manual replay.
 - **A task must not be marked successful before a qualifying supplier response is
   observed and the success transition is committed.**
 - No ordering is promised between deliveries.
+- If destination capacity is unavailable, the identifier-only dispatch signal is
+  durably deferred before the consumed signal is acknowledged; no delivery lease
+  is held while waiting and one throttled destination must not exhaust all broker
+  credit.
 - Delivery is at least once. **The same task may be sent more than once**, notably
   when the supplier may have processed a request but the local success transaction
   did not commit.
@@ -102,7 +106,8 @@ manual replay.
 - **Logs must not contain sensitive headers**, credentials, or request bodies.
 - **No network connection may be initiated to an unapproved target address.**
 - Operators can observe submission rate, delivery results, oldest pending age,
-  Outbox age, queue depth, expired leases, and permanent failures.
+  Outbox age, queue availability/depth, expired leases, and permanent failures.
+  Queue probe failure does not hide PostgreSQL-authoritative metrics.
 
 ## Reliability contract
 

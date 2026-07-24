@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"time"
 
@@ -13,8 +14,13 @@ import (
 
 type snapshotReader func(context.Context) (delivery.OperationalSnapshot, error)
 type queueDepthReader func(context.Context) (int, error)
+type submissionCountsReader func() map[string]uint64
 
-func newMetricsHandler(snapshot snapshotReader, queueDepth queueDepthReader) http.Handler {
+func newMetricsHandler(
+	snapshot snapshotReader,
+	queueDepth queueDepthReader,
+	submissionCounts submissionCountsReader,
+) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
 		defer cancel()
@@ -23,10 +29,12 @@ func newMetricsHandler(snapshot snapshotReader, queueDepth queueDepthReader) htt
 			http.Error(response, "metrics unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		depth, err := queueDepth(ctx)
-		if err != nil {
-			http.Error(response, "metrics unavailable", http.StatusServiceUnavailable)
-			return
+		depth, queueErr := queueDepth(ctx)
+		queueUp := 1.0
+		queueDepthValue := float64(depth)
+		if queueErr != nil {
+			queueUp = 0
+			queueDepthValue = math.NaN()
 		}
 		registry := prometheus.NewRegistry()
 		registerGauge := func(name, help string, value float64) {
@@ -52,7 +60,12 @@ func newMetricsHandler(snapshot snapshotReader, queueDepth queueDepthReader) htt
 		registerGauge(
 			"notifier_queue_depth",
 			"Number of ready dispatch signals reported by RabbitMQ.",
-			float64(depth),
+			queueDepthValue,
+		)
+		registerGauge(
+			"notifier_rabbitmq_up",
+			"Whether the RabbitMQ queue probe succeeded.",
+			queueUp,
 		)
 		registerGauge(
 			"notifier_permanent_failures",
@@ -70,6 +83,21 @@ func newMetricsHandler(snapshot snapshotReader, queueDepth queueDepthReader) htt
 			results.WithLabelValues(class).Set(float64(values.ResultClasses[class]))
 		}
 		registry.MustRegister(results)
+		submissions := prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "notifier_submissions_total",
+				Help: "HTTP delivery submissions by bounded acceptance outcome.",
+			},
+			[]string{"outcome"},
+		)
+		counts := map[string]uint64{}
+		if submissionCounts != nil {
+			counts = submissionCounts()
+		}
+		for _, outcome := range []string{"accepted", "rejected"} {
+			submissions.WithLabelValues(outcome).Add(float64(counts[outcome]))
+		}
+		registry.MustRegister(submissions)
 		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(response, request)
 	})
 }

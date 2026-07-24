@@ -27,10 +27,12 @@ Promise durable acceptance and at-least-once delivery, not exactly-once effects.
   idempotency mechanism.
 - Mark success only after a configured successful HTTP response and a committed
   success transition.
-- Perform a read-only eligibility and immutable-destination lookup, then obtain
-  destination rate/concurrency capacity before acquiring a delivery lease. The
-  atomic claim must recheck generation, pending state, due time, and retry deadline
-  after the wait.
+- Perform a read-only eligibility and immutable-destination lookup, then attempt to
+  obtain destination rate/concurrency capacity before acquiring a delivery lease.
+  When capacity is unavailable, confirm a durable delayed replacement signal
+  before ACKing the original. The atomic claim must recheck generation, pending
+  state, due time, and retry deadline; a failed claim rolls back its rate
+  reservation.
 - Use finite Worker leases. An expired lease is reclaimable.
 - Fence every Worker result update by delivery ID, generation, `delivering` state,
   lease owner, lease token, and lease validity. A zero-row update means ownership
@@ -53,9 +55,9 @@ replay; and appends an operator, reason, and timestamp to the audit record.
   unchanged.
 - Duplicate queue messages usually do not create duplicate sends because the
   database generation and lease are checked first.
-- Waiting for destination capacity cannot consume lease lifetime. If delivery
-  state changes during that wait, the final conditional claim fails and no HTTP
-  connection is made.
+- Deferring for destination capacity cannot consume lease lifetime or all broker
+  credit. If delivery state changes before the final claim, the claim fails, its
+  rate reservation is rolled back, and no HTTP connection is made.
 - Loss of a Worker ACK after a retryable result cannot trigger an early retry: the
   redelivered message carries the old generation, while the new generation has no
   Outbox signal until `next_attempt_at`.

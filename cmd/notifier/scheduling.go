@@ -27,14 +27,40 @@ func runLeaseReconciler(ctx context.Context, store *delivery.Store, logger *slog
 
 func runRetention(ctx context.Context, store *delivery.Store, logger *slog.Logger) {
 	runMaintenanceLoop(ctx, time.Hour, func(loopContext context.Context) error {
-		_, err := store.DeleteExpiredTerminal(
-			loopContext,
-			7*24*time.Hour,
-			30*24*time.Hour,
-			1000,
-		)
+		_, err := drainRetention(loopContext, store, 1000)
 		return err
 	}, "retention", logger)
+}
+
+type retentionStore interface {
+	DeleteExpiredTerminal(
+		context.Context,
+		time.Duration,
+		time.Duration,
+		int,
+	) (int64, error)
+}
+
+func drainRetention(ctx context.Context, store retentionStore, batchSize int) (int64, error) {
+	var total int64
+	for {
+		deleted, err := store.DeleteExpiredTerminal(
+			ctx,
+			7*24*time.Hour,
+			30*24*time.Hour,
+			batchSize,
+		)
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if deleted < int64(batchSize) {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+	}
 }
 
 func runOperationalAlerts(ctx context.Context, store *delivery.Store, logger *slog.Logger) {

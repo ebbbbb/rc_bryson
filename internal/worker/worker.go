@@ -21,6 +21,7 @@ type Store interface {
 		string,
 		int64,
 	) (delivery.DestinationVersion, error)
+	ObserveSignal(context.Context, string, int64) error
 	ClaimDelivery(
 		context.Context,
 		string,
@@ -96,11 +97,17 @@ func (worker *Worker) Process(ctx context.Context, signal dispatch.Signal) (bool
 		return false, fmt.Errorf("check delivery eligibility: %w", err)
 	}
 
-	release, err := worker.limiter.acquire(ctx, destination)
-	if err != nil {
-		return false, fmt.Errorf("wait for destination capacity: %w", err)
+	if err := worker.store.ObserveSignal(
+		ctx,
+		signal.DeliveryID,
+		signal.Generation,
+	); err != nil {
+		return false, fmt.Errorf("record dispatch signal observation: %w", err)
 	}
-	defer release()
+	permit, ok := worker.limiter.tryAcquire(destination)
+	if !ok {
+		return false, nil
+	}
 
 	task, destination, err := worker.store.ClaimDelivery(
 		ctx,
@@ -110,11 +117,14 @@ func (worker *Worker) Process(ctx context.Context, signal dispatch.Signal) (bool
 		worker.leaseDuration,
 	)
 	if errors.Is(err, delivery.ErrDeliveryNotClaimable) {
+		permit.release(false)
 		return true, nil
 	}
 	if err != nil {
+		permit.release(false)
 		return false, fmt.Errorf("claim delivery: %w", err)
 	}
+	defer permit.release(true)
 
 	startedAt := worker.now().UTC()
 	result, err := worker.sender.Send(ctx, task, destination)

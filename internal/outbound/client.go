@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -72,7 +73,7 @@ type Sender struct {
 	secrets      SecretProvider
 	dial         func(context.Context, string, string) (net.Conn, error)
 	testPolicy   bool
-	testCAFile   string
+	testRoots    *x509.CertPool
 	testHostname string
 }
 
@@ -93,11 +94,25 @@ func NewSender(
 	if secrets == nil {
 		return nil, errors.New("outbound sender requires a secret provider")
 	}
+	var testRoots *x509.CertPool
+	if testPolicy {
+		if testCAFile == "" {
+			return nil, errors.New("test-only TLS trust is unavailable")
+		}
+		certificate, err := os.ReadFile(testCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read test-only CA: %w", err)
+		}
+		testRoots = x509.NewCertPool()
+		if !testRoots.AppendCertsFromPEM(certificate) {
+			return nil, errors.New("parse test-only CA")
+		}
+	}
 	return &Sender{
 		resolver:     resolver,
 		secrets:      secrets,
 		testPolicy:   testPolicy,
-		testCAFile:   testCAFile,
+		testRoots:    testRoots,
 		testHostname: "fake-supplier.test",
 	}, nil
 }
@@ -107,6 +122,12 @@ func (sender *Sender) Send(
 	task delivery.Delivery,
 	destination delivery.DestinationVersion,
 ) (Result, error) {
+	if destination.RequestTimeout <= 0 {
+		return Result{}, permanent(errors.New("destination request timeout is invalid"))
+	}
+	attemptContext, cancel := context.WithTimeout(ctx, destination.RequestTimeout)
+	defer cancel()
+
 	target, err := validateURL(destination.URL)
 	if err != nil {
 		return Result{}, permanent(err)
@@ -127,7 +148,7 @@ func (sender *Sender) Send(
 		return Result{}, permanent(err)
 	}
 
-	addresses, err := sender.resolver.LookupIP(ctx, "ip", target.Hostname())
+	addresses, err := sender.resolver.LookupIP(attemptContext, "ip", target.Hostname())
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve registered destination: %w", err)
 	}
@@ -135,16 +156,18 @@ func (sender *Sender) Send(
 	if err != nil {
 		return Result{}, permanent(err)
 	}
-	roots, err := sender.roots(destination.NetworkPolicy)
-	if err != nil {
-		return Result{}, permanent(err)
-	}
-	secret, err := sender.secrets.Resolve(ctx, destination.SecretRef)
+	roots := sender.roots(destination.NetworkPolicy)
+	secret, err := sender.secrets.Resolve(attemptContext, destination.SecretRef)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve destination credential: %w", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, task.Method, target.String(), bytes.NewReader(task.Body))
+	request, err := http.NewRequestWithContext(
+		attemptContext,
+		task.Method,
+		target.String(),
+		bytes.NewReader(task.Body),
+	)
 	if err != nil {
 		return Result{}, permanent(fmt.Errorf("build outbound request: %w", err))
 	}
@@ -252,32 +275,56 @@ func (sender *Sender) validateAddresses(policy string, addresses []net.IP) (net.
 	return addresses[0], nil
 }
 
-func (sender *Sender) roots(policy string) (*x509.CertPool, error) {
+func (sender *Sender) roots(policy string) *x509.CertPool {
 	if policy != testNetworkPolicy {
-		return nil, nil
+		return nil
 	}
-	if !sender.testPolicy || sender.testCAFile == "" {
-		return nil, errors.New("test-only TLS trust is unavailable")
-	}
-	certificate, err := os.ReadFile(sender.testCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("read test-only CA: %w", err)
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(certificate) {
-		return nil, errors.New("parse test-only CA")
-	}
-	return roots, nil
+	return sender.testRoots
+}
+
+var forbiddenPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.31.196.0/24"),
+	netip.MustParsePrefix("192.175.48.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2620:4f:8000::/48"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
 }
 
 func forbidden(address net.IP) bool {
-	return address == nil ||
-		address.IsUnspecified() ||
-		address.IsLoopback() ||
-		address.IsPrivate() ||
-		address.IsLinkLocalUnicast() ||
-		address.IsLinkLocalMulticast() ||
-		address.IsMulticast()
+	parsed, ok := netip.AddrFromSlice(address)
+	if !ok {
+		return true
+	}
+	parsed = parsed.Unmap()
+	if !parsed.IsGlobalUnicast() ||
+		parsed.IsPrivate() ||
+		parsed.IsLoopback() ||
+		parsed.IsLinkLocalUnicast() ||
+		parsed.IsMulticast() ||
+		parsed.IsUnspecified() {
+		return true
+	}
+	for _, prefix := range forbiddenPrefixes {
+		if prefix.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateStoredHeaders(headers map[string]string, destination delivery.DestinationVersion) error {

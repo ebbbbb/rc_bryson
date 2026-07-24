@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -17,6 +19,7 @@ const (
 	DeadLetterExchange = "reliable-notifier.dispatch.dlx"
 	DeadLetterQueue    = "reliable-notifier.dispatch.dlq"
 	DeadLetterKey      = "dead"
+	DeferralQueue      = "reliable-notifier.dispatch.deferred"
 )
 
 type Signal struct {
@@ -25,11 +28,38 @@ type Signal struct {
 	TraceID    string `json:"trace_id"`
 }
 
+func (signal Signal) Validate() error {
+	if !validUUID(signal.DeliveryID) {
+		return errors.New("dispatch signal delivery_id is not a UUID")
+	}
+	if signal.Generation < 0 {
+		return errors.New("dispatch signal generation is negative")
+	}
+	if !validUUID(signal.TraceID) {
+		return errors.New("dispatch signal trace_id is not a UUID")
+	}
+	return nil
+}
+
+func validUUID(value string) bool {
+	if len(value) != 36 ||
+		value[8] != '-' ||
+		value[13] != '-' ||
+		value[18] != '-' ||
+		value[23] != '-' {
+		return false
+	}
+	compact := value[:8] + value[9:13] + value[14:18] + value[19:23] + value[24:]
+	_, err := hex.DecodeString(compact)
+	return err == nil
+}
+
 type RabbitBroker struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
 	confirms   <-chan amqp.Confirmation
 	returns    <-chan amqp.Return
+	mu         sync.Mutex
 }
 
 func NewRabbitBroker(rawURL string) (*RabbitBroker, error) {
@@ -125,24 +155,54 @@ func (broker *RabbitBroker) declareTopology() error {
 	); err != nil {
 		return fmt.Errorf("bind dispatch queue: %w", err)
 	}
+	if _, err := broker.channel.QueueDeclare(
+		DeferralQueue,
+		true,
+		false,
+		false,
+		false,
+		amqp.Table{
+			"x-dead-letter-exchange":    ExchangeName,
+			"x-dead-letter-routing-key": RoutingKey,
+			"x-message-ttl":             int32(250),
+		},
+	); err != nil {
+		return fmt.Errorf("declare dispatch deferral queue: %w", err)
+	}
 	return nil
 }
 
 func (broker *RabbitBroker) Publish(ctx context.Context, signal Signal) error {
+	return broker.publishSignal(ctx, ExchangeName, RoutingKey, "delivery.dispatch", signal)
+}
+
+func (broker *RabbitBroker) Defer(ctx context.Context, signal Signal) error {
+	return broker.publishSignal(ctx, "", DeferralQueue, "delivery.deferred", signal)
+}
+
+func (broker *RabbitBroker) publishSignal(
+	ctx context.Context,
+	exchange string,
+	routingKey string,
+	messageType string,
+	signal Signal,
+) error {
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
 	body, err := json.Marshal(signal)
 	if err != nil {
 		return fmt.Errorf("encode dispatch signal: %w", err)
 	}
 	err = broker.channel.PublishWithContext(
 		ctx,
-		ExchangeName,
-		RoutingKey,
+		exchange,
+		routingKey,
 		true,
 		false,
 		amqp.Publishing{
 			DeliveryMode: amqp.Persistent,
 			ContentType:  "application/json",
-			Type:         "delivery.dispatch",
+			Type:         messageType,
 			Timestamp:    time.Now().UTC(),
 			Body:         body,
 		},

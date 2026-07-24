@@ -37,6 +37,11 @@ confirmation, and a dead-letter path. A message contains only `delivery_id`,
 `generation`, and `trace_id`. Queue contents are not authoritative and may be
 reconstructed from PostgreSQL.
 
+A bounded-delay durable deferral queue carries the same identifier-only signal
+when a destination has no immediately available rate/concurrency capacity. The
+consumer publishes the replacement with confirmation before ACKing the original,
+so capacity waiting releases broker credit without dropping the signal.
+
 The queue's dead-letter queue diagnoses message-transport or consumer failures. It
 is not the record of business delivery failure. A delivery becomes permanently
 failed only through a committed PostgreSQL state transition.
@@ -44,8 +49,10 @@ failed only through a committed PostgreSQL state transition.
 ### Worker
 
 Consumes a signal, performs a read-only eligibility and immutable-destination
-lookup, waits for destination capacity without holding a lease, and then
-conditionally leases the matching PostgreSQL delivery with a second generation,
+lookup, records that the current signal was observed, and attempts to reserve
+destination capacity without holding a lease. If capacity is unavailable, it
+durably defers the signal and releases broker credit. Once capacity is reserved,
+it conditionally leases the matching PostgreSQL delivery with a second generation,
 state, due-time, and deadline check. It performs one HTTPS attempt outside the
 database transaction, records the result, and only then ACKs the signal. Duplicate,
 stale, or terminal-state messages are acknowledged without sending. Each lease has
@@ -69,9 +76,9 @@ ordinary retries:
 - for an expired `delivering` lease, a compare-and-set transition returns the task
   to pending, advances its generation, and creates a repair Outbox event;
 - for a due current-generation pending task whose existing Outbox was published
-  but produced no lease within a bounded dispatch watchdog interval, and which has
-  no unpublished signal, it makes that same Outbox eligible for republishing
-  without advancing business state.
+  but was not observed by a consumer and produced no lease within a bounded
+  dispatch watchdog interval, and which has no unpublished signal, it makes that
+  same Outbox eligible for republishing without advancing business state.
 
 Unique `(delivery_id, generation)` records and conditional updates make concurrent
 scheduler/reconciler runs idempotent. A signal can never advance a delivery unless
@@ -94,8 +101,12 @@ messages.
 ### Observability and maintenance
 
 Metrics and redacted structured logs expose state transitions and failure classes.
-Maintenance removes only terminal records after their retention period and applies
-admission backpressure when configured backlog limits are reached.
+Database-authoritative metrics remain available during a queue outage, alongside a
+separate queue-up signal and unavailable queue depth. Submission counters use only
+bounded accepted/rejected labels. Maintenance drains bounded deletion transactions
+until no full batch remains, removes only terminal records after their retention
+period, and applies admission backpressure when configured backlog limits are
+reached.
 
 Admission serializes the idempotency lookup and active-count decision in the
 submission transaction. The default global limit is 100,000 rows whose state is
@@ -175,12 +186,16 @@ No other operation advances generation.
 2. Read the matching current, pending, and due generation plus its immutable
    destination version. If the message is stale, duplicate, terminal, early, or
    beyond its retry deadline, ACK without connecting.
-3. Wait for destination-global rate and concurrency capacity without holding a
-   delivery lease.
-4. Atomically change the matching generation from `pending` to `delivering`,
+3. Record current-generation signal observation. If destination-global rate or
+   concurrency capacity is unavailable, publish the same identifier-only signal
+   to the durable delay queue with confirmation, then ACK the original. No lease
+   is held while deferred.
+4. With a capacity reservation, atomically change the matching generation from
+   `pending` to `delivering`,
    rechecking generation, state, `next_attempt_at`, and retry deadline while
    assigning a finite lease owner, unique lease token, and lease deadline. If the
-   check no longer matches, ACK without connecting.
+   check no longer matches, roll back the rate reservation and ACK without
+   connecting.
 5. Resolve the destination version's current secret, enforce protected headers,
    validate DNS/IP policy, and bind the validated IP to the actual TLS connection
    with hostname verification and redirects disabled.
@@ -190,8 +205,9 @@ No other operation advances generation.
    records `next_attempt_at`; if the next attempt would exceed the cycle deadline,
    commit `failed_permanent` instead.
 8. If the fenced update affects zero rows, discard the stale result.
-9. ACK only after a committed result or a definitive stale-message/result
-   decision. Database uncertainty is not a reason to ACK.
+9. ACK only after a committed result, a definitive stale-message/result decision,
+   or publisher confirmation of a durable capacity-deferral replacement. Database
+   uncertainty is not a reason to ACK.
 
 ### Recovery
 
@@ -199,8 +215,10 @@ No other operation advances generation.
   only when `next_attempt_at <= now`; it never advances generation.
 - The Reconciler returns an expired `delivering` lease to `pending` with a new
   generation and repair event.
-- A current-generation signal that has produced no lease by the dispatch watchdog
-  deadline may be republished without changing generation; duplicates are safe.
+- A current-generation signal that has neither been observed by a consumer nor
+  produced a lease by the dispatch watchdog deadline may be republished without
+  changing generation; capacity-deferred signals refresh their observation and do
+  not trigger watchdog amplification.
 - Queue unavailability accumulates Outbox rows but does not invalidate API
   acceptance. Backpressure protects PostgreSQL from unbounded accumulation.
 
@@ -208,8 +226,9 @@ No other operation advances generation.
 
 1. `202` implies the delivery and initial Outbox event committed atomically.
 2. No pre-send path can transition a delivery to `succeeded`.
-3. A Worker waits for destination capacity before creating a finite delivery
-   lease; every `delivering` state is reclaimable after lease expiry.
+3. A Worker either reserves destination capacity before creating a finite delivery
+   lease or durably defers the signal; every `delivering` state is reclaimable
+   after lease expiry.
 4. Duplicate queue messages are harmless, but duplicate HTTP sends remain possible.
 5. Retryable and permanent failures have distinct state transitions and metrics.
 6. Sensitive headers, credentials, and bodies never enter logs or queue messages.
@@ -234,7 +253,8 @@ No other operation advances generation.
 | API after commit before response | Caller sees uncertainty | Retry returns the original task |
 | Queue unavailable | Outbox backlog grows | Publisher resumes later; admission backpressure limits growth |
 | Publisher after publish, before marking | Duplicate queue message | Database generation/state check suppresses duplicate work where possible |
-| Message lost after publication | Current generation never obtains a lease before the watchdog deadline | Reconciler republishes the same generation; PostgreSQL state does not advance |
+| Message lost after publication | Current generation is neither observed nor leased before the watchdog deadline | Reconciler republishes the same generation; PostgreSQL state does not advance |
+| Destination capacity unavailable | Signal cannot acquire its destination limiter | Confirm a durable delayed replacement, ACK the original, and retry without consuming all broker credit |
 | Worker before HTTP connection | Lease eventually expires | Task is reclaimed |
 | Worker during HTTP or after supplier effect | Result is unknown | Lease expiry causes retry; duplicate supplier effect is possible |
 | Old message redelivered after retry result | Message generation is lower than current generation | ACK without a lease or connection; cannot bypass `next_attempt_at` |

@@ -23,20 +23,10 @@ import (
 const dispatchQueue = dispatch.QueueName
 
 func TestSlice2PublishesIdentifierOnlySignal(t *testing.T) {
-	connection, err := amqp.Dial(rabbitURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	connection, channel := connectDispatchTopology(t)
 	defer connection.Close()
-	channel, err := connection.Channel()
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer channel.Close()
 
-	if _, err := channel.QueueDeclarePassive(dispatchQueue, true, false, false, false, nil); err != nil {
-		t.Fatalf("durable dispatch queue is unavailable: %v", err)
-	}
 	if _, err := channel.QueuePurge(dispatchQueue, false); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +43,7 @@ func TestSlice2PublishesIdentifierOnlySignal(t *testing.T) {
 	}
 
 	found := false
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		message, ok, err := channel.Get(dispatchQueue, false)
 		if err != nil {
@@ -154,6 +144,9 @@ func TestSlice2QueueOutageDoesNotStrandAcceptedDelivery(t *testing.T) {
 }
 
 func TestSlice2ConfirmAmbiguityProducesDuplicateSignalNotDelivery(t *testing.T) {
+	topologyConnection, topologyChannel := connectDispatchTopology(t)
+	_ = topologyChannel.Close()
+	_ = topologyConnection.Close()
 	compose(t, "stop", "app")
 	t.Cleanup(func() {
 		composeCleanup(t, "up", "-d", "--wait", "--wait-timeout", "120", "app")
@@ -180,10 +173,7 @@ func TestSlice2ConfirmAmbiguityProducesDuplicateSignalNotDelivery(t *testing.T) 
 		t.Fatal(err)
 	}
 	failingStore := &failFirstMarkStore{Store: store}
-	firstBroker, err := dispatch.NewRabbitBroker(rabbitURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	firstBroker := connectDispatchBroker(t)
 	firstPublisher, err := dispatch.NewPublisher(failingStore, firstBroker, "ambiguity-first", 30*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -193,10 +183,7 @@ func TestSlice2ConfirmAmbiguityProducesDuplicateSignalNotDelivery(t *testing.T) 
 	}
 	_ = firstBroker.Close()
 
-	secondBroker, err := dispatch.NewRabbitBroker(rabbitURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	secondBroker := connectDispatchBroker(t)
 	secondPublisher, err := dispatch.NewPublisher(store, secondBroker, "ambiguity-second", 30*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -291,15 +278,15 @@ func TestSlice2OutboxLeaseHasSingleOwnerAndFencesPublication(t *testing.T) {
 }
 
 func TestSlice2DeadLetterQueueRemainsIdentifierOnly(t *testing.T) {
+	topologyConnection, topologyChannel := connectDispatchTopology(t)
+	_ = topologyChannel.Close()
+	_ = topologyConnection.Close()
 	compose(t, "stop", "app")
 	t.Cleanup(func() {
 		composeCleanup(t, "up", "-d", "--wait", "--wait-timeout", "120", "app")
 	})
 
-	broker, err := dispatch.NewRabbitBroker(rabbitURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	broker := connectDispatchBroker(t)
 	connection := connectRabbit(t)
 	channel, err := connection.Channel()
 	if err != nil {
@@ -529,6 +516,58 @@ func connectRabbit(t *testing.T) *amqp.Connection {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("connect RabbitMQ: %v", lastErr)
+	return nil
+}
+
+func connectDispatchTopology(t *testing.T) (*amqp.Connection, *amqp.Channel) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		connection, err := amqp.Dial(rabbitURL(t))
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		channel, err := connection.Channel()
+		if err == nil {
+			_, err = channel.QueueDeclarePassive(
+				dispatch.QueueName,
+				true,
+				false,
+				false,
+				false,
+				nil,
+			)
+		}
+		if err == nil {
+			return connection, channel
+		}
+		lastErr = err
+		if channel != nil {
+			_ = channel.Close()
+		}
+		_ = connection.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("wait for RabbitMQ dispatch topology: %v", lastErr)
+	return nil, nil
+}
+
+func connectDispatchBroker(t *testing.T) *dispatch.RabbitBroker {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		broker, err := dispatch.NewRabbitBroker(rabbitURL(t))
+		if err == nil {
+			return broker
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("connect RabbitMQ dispatch broker: %v", lastErr)
 	return nil
 }
 

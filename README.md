@@ -145,9 +145,9 @@ Implementation sequencing and acceptance evidence live in
 - `GET /healthz` reports process liveness.
 - `GET /readyz` reports PostgreSQL readiness. RabbitMQ outages do not make the API
   unready because accepted tasks remain durable in PostgreSQL and Outbox.
-- `GET /metrics` exposes oldest pending and Outbox ages, expired leases, RabbitMQ
-  queue depth, permanent failures, and fixed delivery-result classes in Prometheus
-  text format.
+- `GET /metrics` exposes accepted/rejected submission counts, oldest pending and
+  Outbox ages, expired leases, RabbitMQ availability/queue depth, permanent
+  failures, and fixed delivery-result classes in Prometheus text format.
 
 The application emits bounded structured warnings when pending or Outbox age
 reaches 60 seconds or expired Worker leases are observed. These warnings indicate

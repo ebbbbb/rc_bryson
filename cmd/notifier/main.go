@@ -89,6 +89,7 @@ func main() {
 		func(ctx context.Context) (int, error) {
 			return dispatch.QueueDepth(ctx, rabbitURL)
 		},
+		api.SubmissionCounts,
 	)
 
 	server := &http.Server{

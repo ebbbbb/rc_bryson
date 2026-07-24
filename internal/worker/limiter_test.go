@@ -23,7 +23,7 @@ func TestDestinationLimiterDoesNotBlockAnotherDestination(t *testing.T) {
 	go func() {
 		secondRelease, acquireErr := limiter.acquire(t.Context(), first)
 		if acquireErr == nil {
-			secondRelease()
+			secondRelease.release(true)
 		}
 		close(blocked)
 	}()
@@ -42,8 +42,8 @@ func TestDestinationLimiterDoesNotBlockAnotherDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherRelease()
-	release()
+	otherRelease.release(true)
+	release.release(true)
 	select {
 	case <-blocked:
 	case <-time.After(time.Second):

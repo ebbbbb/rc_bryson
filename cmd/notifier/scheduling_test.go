@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"reliable-notifier/internal/delivery"
 )
@@ -29,5 +31,32 @@ func TestOperationalAlertsAreActionableAndBounded(t *testing.T) {
 		if !strings.Contains(logs, required) {
 			t.Fatalf("operational alerts missing %q:\n%s", required, logs)
 		}
+	}
+}
+
+type retentionBatches struct {
+	results []int64
+	calls   int
+}
+
+func (store *retentionBatches) DeleteExpiredTerminal(
+	context.Context,
+	time.Duration,
+	time.Duration,
+	int,
+) (int64, error) {
+	result := store.results[store.calls]
+	store.calls++
+	return result, nil
+}
+
+func TestRetentionCycleDrainsMoreThanOneBatch(t *testing.T) {
+	store := &retentionBatches{results: []int64{1000, 1000, 250}}
+	deleted, err := drainRetention(t.Context(), store, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2250 || store.calls != 3 {
+		t.Fatalf("drainRetention = %d across %d calls, want 2250 across 3", deleted, store.calls)
 	}
 }

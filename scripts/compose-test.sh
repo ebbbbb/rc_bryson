@@ -112,19 +112,53 @@ compose exec -T postgres psql -v ON_ERROR_STOP=1 -U notifier -d notifier \
 	-c "CREATE TABLE IF NOT EXISTS toolchain_persistence_probe (id integer PRIMARY KEY, marker text NOT NULL)" \
 	-c "INSERT INTO toolchain_persistence_probe (id, marker) VALUES (1, '$marker') ON CONFLICT (id) DO UPDATE SET marker = EXCLUDED.marker" \
 	>/dev/null
-compose restart postgres >/dev/null
+compose stop postgres >/dev/null
+compose rm -f postgres >/dev/null
 compose up -d --wait --wait-timeout 120 postgres >/dev/null
 stored_marker=$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U notifier -d notifier \
 	-c "SELECT marker FROM toolchain_persistence_probe WHERE id = 1")
 test "$stored_marker" = "$marker"
-echo "PASS PostgreSQL test volume persists across restart"
+echo "PASS PostgreSQL named volume persists across container recreation"
+
+compose stop rabbitmq >/dev/null
+compose rm -sf app >/dev/null
+compose up -d --wait --wait-timeout 120 app >/dev/null
+test -z "$(compose ps --status running -q rabbitmq)"
+app_endpoint=$(compose port app 8080)
+app_port=${app_endpoint##*:}
+cold_key="rabbit-cold-start-$(date +%s)-$$"
+cold_payload='{"destination_id":"supplier-a","method":"POST","headers":{"Content-Type":"application/json","X-Event-Type":"cold-start"},"body_base64":"e30="}'
+cold_response=$(
+	curl --noproxy '*' --fail --silent --show-error \
+		-H "Authorization: Bearer caller-a-test-key" \
+		-H "Idempotency-Key: $cold_key" \
+		-H "Content-Type: application/json" \
+		--data "$cold_payload" \
+		"http://127.0.0.1:$app_port/deliveries"
+)
+cold_id=$(printf '%s' "$cold_response" | jq -er '.id')
+cold_published=$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U notifier -d notifier \
+	-c "SELECT published_at IS NOT NULL FROM outbox_events WHERE delivery_id = '$cold_id'")
+test "$cold_published" = "f"
+echo "PASS API cold-starts and commits Outbox while RabbitMQ is unavailable"
+compose up -d --wait --wait-timeout 120 rabbitmq >/dev/null
 
 rabbit_endpoint=$(compose port rabbitmq 5672)
 rabbit_port=${rabbit_endpoint##*:}
 export RABBITMQ_URL="amqp://notifier:notifier-test-only@127.0.0.1:$rabbit_port/"
 queue="notifier.toolchain.restart-probe"
 body="rabbit-$(date +%s)-$$"
-go run ./cmd/toolchain-probe rabbit-publish "$queue" "$body"
+published=false
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+	if go run ./cmd/toolchain-probe rabbit-publish "$queue" "$body"; then
+		published=true
+		break
+	fi
+	attempt=$((attempt + 1))
+	sleep 0.25
+done
+test "$published" = "true"
 compose restart rabbitmq >/dev/null
 compose up -d --wait --wait-timeout 120 rabbitmq >/dev/null
 rabbit_endpoint=$(compose port rabbitmq 5672)

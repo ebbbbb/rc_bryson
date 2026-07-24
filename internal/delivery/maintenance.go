@@ -35,6 +35,11 @@ func (store *Store) ReconcileStalledSignals(
 				AND event.published_at IS NOT NULL
 				AND event.published_at <=
 					clock_timestamp() - ($1 * interval '1 millisecond')
+				AND (
+					event.observed_at IS NULL
+					OR event.observed_at <=
+						clock_timestamp() - ($1 * interval '1 millisecond')
+				)
 				AND event.lease_owner IS NULL
 				AND event.lease_token IS NULL
 				AND event.lease_until IS NULL
@@ -46,7 +51,8 @@ func (store *Store) ReconcileStalledSignals(
 		SET
 			trace_id = gen_random_uuid(),
 			available_at = clock_timestamp(),
-			published_at = NULL
+			published_at = NULL,
+			observed_at = NULL
 		FROM candidates
 		WHERE event.id = candidates.id
 			AND event.published_at IS NOT NULL

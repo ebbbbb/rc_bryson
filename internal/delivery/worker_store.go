@@ -51,6 +51,29 @@ func (store *Store) EligibleDestination(
 	return queryDestinationVersion(ctx, store.pool, destinationID, destinationVersion)
 }
 
+func (store *Store) ObserveSignal(
+	ctx context.Context,
+	deliveryID string,
+	generation int64,
+) error {
+	_, err := store.pool.Exec(ctx, `
+		UPDATE outbox_events AS event
+		SET observed_at = clock_timestamp()
+		FROM deliveries AS delivery
+		WHERE event.delivery_id = $1
+			AND event.generation = $2
+			AND delivery.id = event.delivery_id
+			AND delivery.generation = event.generation
+			AND delivery.status = 'pending'
+			AND delivery.next_attempt_at <= clock_timestamp()
+			AND delivery.retry_deadline > clock_timestamp()
+	`, deliveryID, generation)
+	if err != nil {
+		return fmt.Errorf("record dispatch signal observation: %w", err)
+	}
+	return nil
+}
+
 func (store *Store) ClaimDelivery(
 	ctx context.Context,
 	deliveryID string,

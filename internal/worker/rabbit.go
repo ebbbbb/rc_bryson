@@ -15,19 +15,32 @@ type RabbitConsumer struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
 	messages   <-chan amqp.Delivery
+	deferrer   signalDeferrer
+}
+
+type signalDeferrer interface {
+	Defer(context.Context, dispatch.Signal) error
+	Close() error
 }
 
 func NewRabbitConsumer(rawURL string) (*RabbitConsumer, error) {
+	deferrer, err := dispatch.NewRabbitBroker(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("create RabbitMQ deferral publisher: %w", err)
+	}
 	connection, err := amqp.Dial(rawURL)
 	if err != nil {
+		_ = deferrer.Close()
 		return nil, fmt.Errorf("connect RabbitMQ Worker: %w", err)
 	}
 	channel, err := connection.Channel()
 	if err != nil {
+		_ = deferrer.Close()
 		_ = connection.Close()
 		return nil, fmt.Errorf("open RabbitMQ Worker channel: %w", err)
 	}
 	if err := channel.Qos(8, 0, false); err != nil {
+		_ = deferrer.Close()
 		_ = channel.Close()
 		_ = connection.Close()
 		return nil, fmt.Errorf("set Worker prefetch: %w", err)
@@ -42,11 +55,17 @@ func NewRabbitConsumer(rawURL string) (*RabbitConsumer, error) {
 		nil,
 	)
 	if err != nil {
+		_ = deferrer.Close()
 		_ = channel.Close()
 		_ = connection.Close()
 		return nil, fmt.Errorf("consume dispatch queue: %w", err)
 	}
-	return &RabbitConsumer{connection: connection, channel: channel, messages: messages}, nil
+	return &RabbitConsumer{
+		connection: connection,
+		channel:    channel,
+		messages:   messages,
+		deferrer:   deferrer,
+	}, nil
 }
 
 func (consumer *RabbitConsumer) Run(ctx context.Context, worker *Worker) error {
@@ -95,10 +114,28 @@ func (consumer *RabbitConsumer) processMessage(
 		}
 		return nil
 	}
+	if err := signal.Validate(); err != nil {
+		if nackErr := message.Nack(false, false); nackErr != nil {
+			return fmt.Errorf("dead-letter invalid signal: %w", nackErr)
+		}
+		return nil
+	}
 	ack, err := worker.Process(ctx, signal)
-	if err != nil || !ack {
+	if err != nil {
 		if nackErr := message.Nack(false, true); nackErr != nil {
 			return fmt.Errorf("requeue failed delivery signal: %w", nackErr)
+		}
+		return fmt.Errorf("process delivery signal: %w", err)
+	}
+	if !ack {
+		if err := consumer.deferrer.Defer(ctx, signal); err != nil {
+			if nackErr := message.Nack(false, true); nackErr != nil {
+				return fmt.Errorf("requeue signal after failed deferral: %w", nackErr)
+			}
+			return fmt.Errorf("defer capacity-limited signal: %w", err)
+		}
+		if err := message.Ack(false); err != nil {
+			return fmt.Errorf("ack durably deferred delivery signal: %w", err)
 		}
 		return nil
 	}
@@ -110,8 +147,13 @@ func (consumer *RabbitConsumer) processMessage(
 
 func (consumer *RabbitConsumer) Close() error {
 	var closeError error
+	if consumer.deferrer != nil {
+		closeError = consumer.deferrer.Close()
+	}
 	if consumer.channel != nil {
-		closeError = consumer.channel.Close()
+		if err := consumer.channel.Close(); err != nil && closeError == nil {
+			closeError = err
+		}
 	}
 	if consumer.connection != nil {
 		if err := consumer.connection.Close(); err != nil && closeError == nil {

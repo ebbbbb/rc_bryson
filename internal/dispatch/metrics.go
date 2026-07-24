@@ -28,5 +28,9 @@ func QueueDepth(ctx context.Context, rawURL string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("inspect RabbitMQ dispatch queue: %w", err)
 	}
-	return queue.Messages, nil
+	deferred, err := channel.QueueInspect(DeferralQueue)
+	if err != nil {
+		return 0, fmt.Errorf("inspect RabbitMQ deferral queue: %w", err)
+	}
+	return queue.Messages + deferred.Messages, nil
 }
