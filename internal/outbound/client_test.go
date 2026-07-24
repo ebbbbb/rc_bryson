@@ -25,6 +25,16 @@ func (resolver fixedResolver) LookupIP(context.Context, string, string) ([]net.I
 	return resolver.addresses, resolver.err
 }
 
+type countingResolver struct {
+	addresses []net.IP
+	calls     atomic.Int32
+}
+
+func (resolver *countingResolver) LookupIP(context.Context, string, string) ([]net.IP, error) {
+	resolver.calls.Add(1)
+	return resolver.addresses, nil
+}
+
 type fixedSecrets struct {
 	value string
 }
@@ -260,6 +270,66 @@ func TestSenderForbiddenPreconditionsMakeZeroConnections(t *testing.T) {
 			}
 			if got := dials.Load(); got != 0 {
 				t.Fatalf("dial attempts = %d, want zero", got)
+			}
+		})
+	}
+}
+
+func TestSenderRejectsUnavailableNetworkPolicyBeforeDNS(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawURL     string
+		policy     string
+		testPolicy bool
+		wantError  string
+	}{
+		{
+			name:      "unsupported policy",
+			rawURL:    "https://supplier.example/notify",
+			policy:    "unregistered-private-network",
+			wantError: "network policy is not supported",
+		},
+		{
+			name:      "disabled test policy",
+			rawURL:    "https://fake-supplier.test/notify",
+			policy:    testNetworkPolicy,
+			wantError: "test-only destination policy",
+		},
+		{
+			name:       "test policy hostname mismatch",
+			rawURL:     "https://supplier.example/notify",
+			policy:     testNetworkPolicy,
+			testPolicy: true,
+			wantError:  "test-only destination policy",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := &countingResolver{
+				addresses: []net.IP{net.ParseIP("203.0.113.8")},
+			}
+			sender, err := NewSender(
+				resolver,
+				fixedSecrets{value: "secret"},
+				test.testPolicy,
+				fixturePath(t, "test-ca.crt"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, destination := testTaskAndDestination(test.rawURL)
+			destination.NetworkPolicy = test.policy
+
+			_, err = sender.Send(t.Context(), task, destination)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want containing %q", err, test.wantError)
+			}
+			if !IsPermanent(err) {
+				t.Fatalf("network policy rejection %v must be permanent", err)
+			}
+			if got := resolver.calls.Load(); got != 0 {
+				t.Fatalf("DNS lookups = %d, want zero", got)
 			}
 		})
 	}

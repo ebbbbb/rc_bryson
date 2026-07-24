@@ -123,12 +123,15 @@ func (sender *Sender) Send(
 	if err := validateStoredHeaders(task.CallerHeaders, destination); err != nil {
 		return Result{}, permanent(err)
 	}
+	if err := sender.validatePolicy(target.Hostname(), destination.NetworkPolicy); err != nil {
+		return Result{}, permanent(err)
+	}
 
 	addresses, err := sender.resolver.LookupIP(ctx, "ip", target.Hostname())
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve registered destination: %w", err)
 	}
-	validatedIP, err := sender.validateAddresses(target.Hostname(), destination.NetworkPolicy, addresses)
+	validatedIP, err := sender.validateAddresses(destination.NetworkPolicy, addresses)
 	if err != nil {
 		return Result{}, permanent(err)
 	}
@@ -220,18 +223,26 @@ func validateURL(rawURL string) (*url.URL, error) {
 	return target, nil
 }
 
-func (sender *Sender) validateAddresses(hostname, policy string, addresses []net.IP) (net.IP, error) {
+func (sender *Sender) validatePolicy(hostname, policy string) error {
+	switch policy {
+	case "public-internet":
+		return nil
+	case testNetworkPolicy:
+		if !sender.testPolicy || hostname != sender.testHostname {
+			return errors.New("test-only destination policy is unavailable")
+		}
+		return nil
+	default:
+		return errors.New("destination network policy is not supported")
+	}
+}
+
+func (sender *Sender) validateAddresses(policy string, addresses []net.IP) (net.IP, error) {
 	if len(addresses) == 0 {
 		return nil, errors.New("destination DNS returned no addresses")
 	}
 	if policy == testNetworkPolicy {
-		if !sender.testPolicy || hostname != sender.testHostname {
-			return nil, errors.New("test-only destination policy is unavailable")
-		}
 		return addresses[0], nil
-	}
-	if policy != "public-internet" {
-		return nil, errors.New("destination network policy is not supported")
 	}
 	for _, address := range addresses {
 		if forbidden(address) {

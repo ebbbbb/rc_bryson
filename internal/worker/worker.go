@@ -215,10 +215,10 @@ func parseRetryAfter(now time.Time, raw string) (time.Duration, bool) {
 		if seconds < 0 {
 			return 0, false
 		}
-		delay := time.Duration(seconds) * time.Second
-		if delay > time.Hour {
-			delay = time.Hour
+		if seconds > int64(time.Hour/time.Second) {
+			return time.Hour, true
 		}
+		delay := time.Duration(seconds) * time.Second
 		return delay, true
 	}
 	at, err := http.ParseTime(raw)

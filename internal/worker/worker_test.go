@@ -300,6 +300,13 @@ func TestRetryTimingUsesBoundedRetryAfterAndDeterministicBackoff(t *testing.T) {
 	if got := instance.nextAttemptAt(now, 4, "7200"); !got.Equal(now.Add(time.Hour)) {
 		t.Fatalf("bounded Retry-After = %s, want %s", got, now.Add(time.Hour))
 	}
+	if got := instance.nextAttemptAt(
+		now,
+		4,
+		"9223372036854775807",
+	); !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("overflowing Retry-After = %s, want %s", got, now.Add(time.Hour))
+	}
 	if got := instance.nextAttemptAt(now, 4, ""); !got.Equal(now.Add(8 * time.Second)) {
 		t.Fatalf("generation backoff = %s, want %s", got, now.Add(8*time.Second))
 	}
